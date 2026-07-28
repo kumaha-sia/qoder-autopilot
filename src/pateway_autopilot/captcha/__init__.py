@@ -2,7 +2,7 @@
 Captcha module — Slider puzzle CAPTCHA solver.
 """
 
-from .slider import SliderSolver
-from .manual import ManualSolver
+from .slider import SliderSolver, ManualSolver
+from .manual import wait_for_manual_solve
 
-__all__ = ["SliderSolver", "ManualSolver"]
+__all__ = ["SliderSolver", "ManualSolver", "wait_for_manual_solve"]

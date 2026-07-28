@@ -202,39 +202,65 @@ class SliderSolver:
     ) -> bool:
         """Perform the slider drag with human-like movement.
 
-        Uses smoothstep easing for natural movement.
+        Uses smoothstep easing for natural movement with realistic physics.
         """
         try:
             target_x = start_x + distance
 
-            # Start drag
-            await page.mouse.move(start_x, start_y)
-            await asyncio.sleep(random.uniform(0.05, 0.1))
-            await page.mouse.down()
-            await asyncio.sleep(random.uniform(0.05, 0.1))
+            # Small random delay before starting (human reaction time)
+            await asyncio.sleep(random.uniform(0.1, 0.3))
 
-            # Move with easing (smoothstep)
-            steps = random.randint(15, 25)
+            # Move to slider with slight overshoot
+            overshoot = random.randint(3, 10)
+            await page.mouse.move(start_x - overshoot, start_y + random.randint(-3, 3))
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+
+            # Move to exact position
+            await page.mouse.move(start_x, start_y)
+            await asyncio.sleep(random.uniform(0.08, 0.2))
+
+            # Press down
+            await page.mouse.down()
+            await asyncio.sleep(random.uniform(0.1, 0.25))
+
+            # Move with easing (smoothstep) - human-like acceleration/deceleration
+            steps = random.randint(20, 35)
             for i in range(steps):
                 progress = i / (steps - 1)
-                # Smoothstep easing
+
+                # Smoothstep easing with slight randomness
                 eased = progress * progress * (3 - 2 * progress)
-                x = start_x + distance * eased
-                y = start_y + random.uniform(-2, 2)  # Slight vertical wobble
+
+                # Add micro-corrections like a human
+                micro_correction = 0
+                if 0.3 < progress < 0.7:  # Middle of drag - more wobble
+                    micro_correction = random.uniform(-2, 2)
+                elif progress > 0.9:  # End - slight overshoot then correct
+                    if i == steps - 2:
+                        micro_correction = random.uniform(1, 5)
+                    elif i == steps - 1:
+                        micro_correction = 0
+
+                x = start_x + distance * eased + micro_correction
+                y = start_y + random.uniform(-3, 3)  # Vertical wobble
 
                 await page.mouse.move(x, y)
-                await asyncio.sleep(random.uniform(0.01, 0.03))
 
-            # Final position
+                # Variable speed - faster in middle, slower at start/end
+                if progress < 0.2 or progress > 0.8:
+                    await asyncio.sleep(random.uniform(0.02, 0.05))
+                else:
+                    await asyncio.sleep(random.uniform(0.01, 0.03))
+
+            # Final position - snap to target
             await page.mouse.move(target_x, start_y)
-            await asyncio.sleep(random.uniform(0.05, 0.1))
+            await asyncio.sleep(random.uniform(0.05, 0.15))
 
-            # Release
+            # Release with slight delay
             await page.mouse.up()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(random.uniform(0.3, 0.8))
 
             # Check if solve was successful
-            # Look for success indicators or absence of captcha
             return await self._verify_solve(page)
 
         except Exception as e:
