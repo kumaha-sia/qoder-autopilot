@@ -128,12 +128,12 @@ async def test_wait_for_otp(tempik):
 @pytest.mark.asyncio
 async def test_generate(tempik):
     """Test convenience generate method."""
-    with patch.object(tempik, "create_session") as mock_session:
-        mock_session.return_value = "test-session"
+    # Pre-set session_id so generate uses it
+    tempik.session_id = "test-session"
 
-        with patch.object(tempik, "create_inbox") as mock_inbox:
-            mock_inbox.return_value = "random@webkarya.net"
+    with patch.object(tempik, "create_inbox") as mock_inbox:
+        mock_inbox.return_value = "random@webkarya.net"
 
-            result = await tempik.generate()
-            assert result["address"] == "random@webkarya.net"
-            assert result["session_id"] == "test-session"
+        result = await tempik.generate()
+        assert result["address"] == "random@webkarya.net"
+        assert result["session_id"] == "test-session"
