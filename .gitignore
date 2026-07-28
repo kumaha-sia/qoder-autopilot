@@ -11,6 +11,10 @@ dist/
 build/
 .eggs/
 *.whl
+.agents
+.claude
+.opencode
+_bmad
 
 # Virtual environments
 .venv/
@@ -36,6 +40,7 @@ qoder_accounts.json
 # ═══════════════════════════════════════════════════
 run_*.log
 screenshots/
+pateway_debug/
 *.png
 !docs/*.png
 !examples/*.png
