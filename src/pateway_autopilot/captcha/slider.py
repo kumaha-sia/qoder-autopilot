@@ -139,10 +139,26 @@ class SliderSolver:
                 candidates.sort(key=lambda c: (c[1], -c[2]))
                 return candidates[0][0]
 
-            # Fallback: use template matching or other methods
-            # For now, estimate based on typical puzzle layout
-            # The gap is usually about 60-70% across the image
-            return int(width * 0.65)
+            # Fallback: try with different thresholds
+            # Collect candidates and sort by brightness (best match first)
+            blurred2 = cv2.GaussianBlur(gray, (7, 7), 0)
+            edges2 = cv2.Canny(blurred2, 30, 100)
+            contours2, _ = cv2.findContours(edges2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            candidates2 = []
+            for contour in contours2:
+                x, y, w, h = cv2.boundingRect(contour)
+                if w > 25 and w < 160 and h > 25 and h < 160 and min_gap_x < x < max_gap_x:
+                    roi = gray[y : y + h, x : x + w]
+                    avg_brightness = roi.mean()
+                    if avg_brightness < 130:
+                        candidates2.append((x + w // 2, avg_brightness, w * h))
+
+            if candidates2:
+                candidates2.sort(key=lambda c: (c[1], -c[2]))
+                return candidates2[0][0]
+
+            # Last resort: return None to indicate failure (don't guess)
+            return None
 
         except ImportError:
             log_warn("OpenCV not installed, using fallback gap detection")
@@ -271,8 +287,24 @@ class SliderSolver:
         """Verify if the slider solve was successful.
 
         Checks for success indicators or absence of captcha.
+        Also verifies page is not in an error/crash state.
         """
         await asyncio.sleep(1)
+
+        # Check if page is in a valid state (not error/crash page)
+        page_state = await page.evaluate("""() => {
+            const url = window.location.href;
+            const body = document.body?.innerText?.substring(0, 200) || '';
+            // Detect error pages
+            if (body.includes('500') && body.length < 50) return 'error_page';
+            if (body.includes('Application Error') || body.includes('This site can')) return 'error_page';
+            if (document.body === null) return 'blank_page';
+            return 'ok';
+        }""")
+
+        if page_state in ('error_page', 'blank_page'):
+            log_warn(f"Page in {page_state} state — CAPTCHA verify assuming failure")
+            return False
 
         # Check if captcha is still visible
         captcha_visible = await page.evaluate("""() => {
@@ -286,7 +318,7 @@ class SliderSolver:
                 const el = document.querySelector(sel);
                 if (el && el.offsetParent !== null) {
                     const rect = el.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
+                    if (rect.width > 50 && rect.height > 30) {
                         return true;
                     }
                 }
@@ -297,12 +329,27 @@ class SliderSolver:
         if not captcha_visible:
             return True
 
-        # Check for success message
+        # Check for success message (stricter matching to avoid false positives)
         page_text = await page.evaluate(
             "() => document.body?.innerText?.substring(0, 500) || ''"
         )
-        success_indicators = ["success", "verified", "passed", "成功", "验证通过"]
-        return any(indicator in page_text.lower() for indicator in success_indicators)
+        text_lower = page_text.lower()
+        # Check for specific success phrases, not just substrings
+        success_phrases = [
+            "success", "verified", "passed", "成功", "验证通过",
+            "solved", "confirmed", "approved",
+        ]
+        # Only match if NOT preceded by negation words
+        negations = ["not ", "un", "fail", "error", "invalid"]
+        for phrase in success_phrases:
+            if phrase in text_lower:
+                # Check context around the match to rule out negation
+                idx = text_lower.index(phrase)
+                context_start = max(0, idx - 10)
+                context = text_lower[context_start:idx]
+                if not any(neg in context for neg in negations):
+                    return True
+        return False
 
 
 class ManualSolver:
@@ -326,8 +373,8 @@ class ManualSolver:
 
         # Make sure browser is visible (not headless)
         # Wait for captcha to be solved
-        start = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start < self.timeout:
+        start = asyncio.get_running_loop().time()
+        while asyncio.get_running_loop().time() - start < self.timeout:
             await asyncio.sleep(2)
 
             # Check if captcha is gone

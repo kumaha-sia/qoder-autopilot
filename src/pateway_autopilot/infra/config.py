@@ -48,10 +48,17 @@ def save_user_config(data: dict) -> bool:
     """Save user config to ~/.pateway-autopilot/config.json."""
     try:
         import json
+        import stat
+        import sys
 
         USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(USER_CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(str(USER_CONFIG_FILE), 2)
+        else:
+            os.chmod(str(USER_CONFIG_FILE), stat.S_IRUSR | stat.S_IWUSR)
         return True
     except Exception:
         return False
@@ -127,7 +134,7 @@ class Settings(BaseSettings):
 
     # ── PatewayAI URLs ────────────────────────────────────────────────
     pateway_url: str = Field(
-        default="https://pateway.ai",
+        default="https://pateway.ai/?aff=9SWQ2B6S",
         description="PatewayAI homepage URL",
     )
     pateway_api_url: str = Field(
@@ -137,7 +144,7 @@ class Settings(BaseSettings):
 
     # ── Behavior ──────────────────────────────────────────────────────
     otp_timeout: int = Field(
-        default=120,
+        default=60,
         description="Max seconds to wait for OTP email",
     )
     captcha_timeout: int = Field(
@@ -182,27 +189,36 @@ settings = Settings()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODULE-LEVEL RE-EXPORTS
+# MODULE-LEVEL RE-EXPORTS (property-like access via __getattr__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Tempik
-TEMPIK_URL = settings.tempik_url
-TEMPIK_DOMAIN = settings.tempik_domain
+# These are lazily resolved from the settings singleton so runtime changes
+# (e.g., env var overrides loaded late) are picked up.
 
-# PatewayAI
-PATEWAY_URL = settings.pateway_url
-PATEWAY_API_URL = settings.pateway_api_url
+_EXPORT_MAP = {
+    "TEMPIK_URL": "tempik_url",
+    "TEMPIK_DOMAIN": "tempik_domain",
+    "PATEWAY_URL": "pateway_url",
+    "PATEWAY_API_URL": "pateway_api_url",
+    "OTP_TIMEOUT": "otp_timeout",
+    "CAPTCHA_TIMEOUT": "captcha_timeout",
+    "MAX_CAPTCHA_ATTEMPTS": "max_captcha_attempts",
+    "PARALLEL_DELAY": "parallel_delay",
+    "KEY_NAME": "key_name",
+    "INVITE_CODE": "invite_code",
+    "SCREENSHOTS_DIR": "screenshots_dir",
+    "CREDENTIALS_FILE": "credentials_file",
+}
 
-# Behavior
-OTP_TIMEOUT = settings.otp_timeout
-CAPTCHA_TIMEOUT = settings.captcha_timeout
-MAX_CAPTCHA_ATTEMPTS = settings.max_captcha_attempts
-PARALLEL_DELAY = settings.parallel_delay
 
-# API Key
-KEY_NAME = settings.key_name
-INVITE_CODE = settings.invite_code
+def __getattr__(name: str):
+    if name in _EXPORT_MAP:
+        return getattr(settings, _EXPORT_MAP[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-# File paths
-SCREENSHOTS_DIR = settings.screenshots_dir
-CREDENTIALS_FILE = settings.credentials_file
+
+# Make `from ..infra.config import *` work for lazy constants
+__all__ = ["settings", "Settings", "load_user_config", "save_user_config",
+           "set_user_config_value", "delete_user_config",
+           "USER_CONFIG_DIR", "USER_CONFIG_FILE",
+           "PACKAGE_DIR", "PROJECT_DIR"] + list(_EXPORT_MAP.keys())

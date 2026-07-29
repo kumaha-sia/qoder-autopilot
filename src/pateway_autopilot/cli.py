@@ -92,8 +92,6 @@ async def run_one(
 
     async with launch_browser(
         headless=headless,
-        window_width=win_w,
-        window_height=win_h,
         proxy=proxy,
     ) as browser:
         page = await browser.new_page()
@@ -162,14 +160,20 @@ async def main_async(args: argparse.Namespace) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _handle_signal)
     except NotImplementedError:
-        pass  # Windows doesn't support add_signal_handler
+        # Windows: set up KeyboardInterrupt handler via signal.signal
+        def _win_signal_handler(sig, frame):
+            _handle_signal()
+        signal.signal(signal.SIGINT, _win_signal_handler)
 
     headless = args.headless
     manual_captcha = args.manual_captcha
     parallel = args.parallel
 
-    # Apply verbosity
-    if args.verbose:
+    # Apply verbosity (mutually exclusive: verbose takes precedence, warn if both)
+    if args.verbose and args.quiet:
+        log_warn("Both --verbose and --quiet specified — using verbose mode")
+        set_verbosity(2)
+    elif args.verbose:
         set_verbosity(2)
     elif args.quiet:
         set_verbosity(0)
@@ -182,7 +186,8 @@ async def main_async(args: argparse.Namespace) -> None:
 
     proxy = args.proxy
     output_format = args.output_format
-    invite_code = args.invite_code or config.INVITE_CODE
+    # Use args.invite_code if provided (even if empty string), else fall back to config
+    invite_code = args.invite_code if args.invite_code is not None else config.INVITE_CODE
 
     # Dry-run mode
     if args.dry_run:
@@ -203,6 +208,9 @@ async def main_async(args: argparse.Namespace) -> None:
 
     if parallel and args.count > 1:
         # PARALLEL MODE
+        if manual_captcha:
+            log_warn("⚠️ Parallel + manual captcha with count >1: multiple browser windows will pause simultaneously")
+            log_warn("   Consider using auto captcha or reducing count for manual mode")
         log(f"⚡ Parallel mode: launching {args.count} browser windows")
 
         async def staggered_run(i: int) -> dict | None:
@@ -237,7 +245,7 @@ async def main_async(args: argparse.Namespace) -> None:
             )
             results.append(r)
             if i < args.count - 1:
-                d = config.PARALLEL_DELAY + random.randint(0, 15)
+                d = args.delay + random.randint(0, 15)
                 log(f"⏳ Waiting {d}s...")
                 await asyncio.sleep(d)
 
@@ -251,19 +259,31 @@ async def main_async(args: argparse.Namespace) -> None:
 
         print(json.dumps(valid_results, indent=2))
     elif output_format == "csv":
+        import csv
+        import io
         if valid_results:
             keys = list(valid_results[0].keys())
-            print(",".join(keys))
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(keys)
             for r in valid_results:
-                print(",".join(str(r.get(k, "")) for k in keys))
+                writer.writerow([str(r.get(k, "")) for k in keys])
+            print(buf.getvalue(), end="")
 
     # Cleanup screenshots on success
     try:
         import shutil
 
-        if config.SCREENSHOTS_DIR.exists() and not any(config.SCREENSHOTS_DIR.glob("*fail*")):
-            shutil.rmtree(config.SCREENSHOTS_DIR, ignore_errors=True)
-            log_debug("Cleaned up debug screenshots")
+        if config.SCREENSHOTS_DIR.exists():
+            # Only delete if ALL accounts succeeded (no failure/error/no_captcha screenshots)
+            fail_patterns = ["*fail*", "*error*", "*no_captcha*", "*send_code_error*", "*otp_timeout*"]
+            has_failure_screenshots = any(
+                config.SCREENSHOTS_DIR.glob(pattern)
+                for pattern in fail_patterns
+            )
+            if not has_failure_screenshots:
+                shutil.rmtree(config.SCREENSHOTS_DIR, ignore_errors=True)
+                log_debug("Cleaned up debug screenshots")
     except Exception:
         pass
 
@@ -326,17 +346,23 @@ def main() -> None:
         action="store_true",
         help="Run all accounts concurrently",
     )
+    def _valid_delay(val: str) -> int:
+        n = int(val)
+        if n < 1:
+            raise argparse.ArgumentTypeError(f"Delay must be at least 1 second, got {n}")
+        return n
+
     p.add_argument(
         "--delay",
-        type=int,
+        type=_valid_delay,
         default=config.PARALLEL_DELAY,
         help=f"Delay between sequential accounts (default: {config.PARALLEL_DELAY}s)",
     )
     p.add_argument(
         "--invite-code",
         type=str,
-        default="",
-        help="Invite code for registration",
+        default=None,
+        help="Invite code for registration (use empty string to override config default)",
     )
     p.add_argument(
         "--verbose",
@@ -444,19 +470,26 @@ def _handle_config_command(argv: list[str]) -> None:
         cli_flag = argv[1]
         value = argv[2]
         key_map = {
-            "tempik-url": "tempik_url",
-            "tempik-domain": "tempik_domain",
-            "otp-timeout": "otp_timeout",
-            "captcha-timeout": "captcha_timeout",
-            "parallel-delay": "parallel_delay",
-            "key-name": "key_name",
-            "invite-code": "invite_code",
+            "tempik-url": ("tempik_url", str),
+            "tempik-domain": ("tempik_domain", str),
+            "otp-timeout": ("otp_timeout", int),
+            "captcha-timeout": ("captcha_timeout", int),
+            "parallel-delay": ("parallel_delay", int),
+            "key-name": ("key_name", str),
+            "invite-code": ("invite_code", str),
         }
-        key = key_map.get(cli_flag)
-        if not key:
+        key_entry = key_map.get(cli_flag)
+        if not key_entry:
             print(f"❌ Unknown key: {cli_flag}")
             print(f"Available: {', '.join(key_map.keys())}")
             sys.exit(1)
+        key, expected_type = key_entry
+        if expected_type == int:
+            try:
+                int(value)
+            except ValueError:
+                print(f"❌ {cli_flag} requires a numeric value, got: '{value}'")
+                sys.exit(1)
         if set_user_config_value(key, value):
             print(f"✅ {cli_flag} = {value}")
             print(f"   Saved to {USER_CONFIG_FILE}")

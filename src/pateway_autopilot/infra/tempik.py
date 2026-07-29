@@ -13,6 +13,7 @@ import asyncio
 import re
 import time
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -97,8 +98,7 @@ class TempikClient:
         client = await self._get_client()
 
         headers = {"x-session-id": session_id}
-        # URL-encode the email address
-        encoded_address = httpx.URL(path=address).path
+        encoded_address = quote(address, safe="")
 
         resp = await client.get(
             f"{self.base_url}/inboxes/{encoded_address}/messages",
@@ -120,7 +120,7 @@ class TempikClient:
         client = await self._get_client()
 
         headers = {"x-session-id": session_id}
-        encoded_address = httpx.URL(path=address).path
+        encoded_address = quote(address, safe="")
 
         resp = await client.delete(
             f"{self.base_url}/inboxes/{encoded_address}",
@@ -144,7 +144,7 @@ class TempikClient:
         self,
         address: str,
         timeout: int = 60,
-        poll_interval: float = 2.0,
+        poll_interval: float = 1.5,
         otp_pattern: str = r"\b(\d{6})\b",
     ) -> Optional[str]:
         """Poll inbox until OTP email arrives.
@@ -165,17 +165,19 @@ class TempikClient:
             try:
                 messages = await self.get_messages(address)
                 for msg in messages:
-                    body = msg.get("body", "") or msg.get("text", "")
                     subject = msg.get("subject", "")
+                    body = msg.get("body", "") or msg.get("text", "")
 
-                    # Try to find OTP in body first, then subject
-                    for text in [body, subject]:
+                    # Check subject first — OTP is often in subject line
+                    for text in [subject, body]:
+                        if not isinstance(text, str):
+                            continue
                         match = pattern.search(text)
                         if match:
                             return match.group(1)
-            except Exception:
-                # Ignore transient errors, keep polling
-                pass
+            except Exception as e:
+                import logging
+                logging.debug(f"Tempik poll error (will retry): {e}")
 
             await asyncio.sleep(poll_interval)
 
@@ -207,10 +209,20 @@ class TempikClientSync:
         """Get or create event loop."""
         if self._loop is None or self._loop.is_closed():
             self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
         return self._loop
 
     def _run(self, coro):
         """Run coroutine synchronously."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            raise RuntimeError(
+                "TempikClientSync cannot be called from within an async context. "
+                "Use TempikClient (async) instead."
+            )
         loop = self._get_loop()
         return loop.run_until_complete(coro)
 
@@ -236,4 +248,9 @@ class TempikClientSync:
         return self._run(self._client.generate())
 
     def close(self):
-        self._run(self._client.close())
+        try:
+            self._run(self._client.close())
+        finally:
+            if self._loop and not self._loop.is_closed():
+                self._loop.close()
+                self._loop = None

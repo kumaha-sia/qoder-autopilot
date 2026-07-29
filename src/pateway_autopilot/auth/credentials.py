@@ -9,6 +9,7 @@ File permissions set to 600 (owner-only read/write).
 import json
 import os
 import stat
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,8 @@ from ..utils.logger import log, log_ok, log_err
 
 
 # Thread-safe file lock for parallel mode
+# In asyncio context, all coroutines run in the same thread so threading.Lock
+# is never contended. This protects against concurrent async file operations.
 _file_lock = None
 
 
@@ -42,13 +45,14 @@ def save_creds(creds: dict, filepath: Optional[Path] = None) -> bool:
     Args:
         creds: Credential dict to save.
         filepath: Path to credentials file.
-                 Defaults to pateway_accounts.json.
+                 Defaults to config.CREDENTIALS_FILE.
 
     Returns:
         True if saved successfully.
     """
     if filepath is None:
-        filepath = Path("pateway_accounts.json")
+        from ..infra.config import CREDENTIALS_FILE
+        filepath = CREDENTIALS_FILE
 
     lock = _get_lock()
 
@@ -73,7 +77,19 @@ def save_creds(creds: dict, filepath: Optional[Path] = None) -> bool:
                 json.dump(existing, f, indent=2, ensure_ascii=False)
 
             # Set permissions before rename
-            os.chmod(str(tmp_path), stat.S_IRUSR | stat.S_IWUSR)
+            if sys.platform == "win32":
+                try:
+                    import subprocess
+                    # Set owner-only ACL via icacls (removes inherited, grants current user Full only)
+                    subprocess.run(
+                        ["icacls", str(tmp_path), "/inheritance:r",
+                         "/grant:r", f"{os.environ.get('USERNAME', os.getlogin())}:(F)"],
+                        capture_output=True, check=False,
+                    )
+                except Exception:
+                    pass
+            else:
+                os.chmod(str(tmp_path), stat.S_IRUSR | stat.S_IWUSR)
 
             # Atomic rename
             tmp_path.replace(filepath)
@@ -96,7 +112,8 @@ def load_creds(filepath: Optional[Path] = None) -> list[dict]:
         List of credential dicts.
     """
     if filepath is None:
-        filepath = Path("pateway_accounts.json")
+        from ..infra.config import CREDENTIALS_FILE
+        filepath = CREDENTIALS_FILE
 
     try:
         if filepath.exists():

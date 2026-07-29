@@ -6,7 +6,7 @@ Generates random Indonesian-style identities for registration.
 Uses Faker with id_ID locale.
 """
 
-import random
+import secrets
 import string
 from typing import Optional
 
@@ -47,8 +47,8 @@ def gen_identity() -> dict:
         first_name = fake.first_name()
         last_name = fake.last_name()
     else:
-        first_name = random.choice(FIRST_NAMES)
-        last_name = random.choice(LAST_NAMES)
+        first_name = secrets.choice(FIRST_NAMES)
+        last_name = secrets.choice(LAST_NAMES)
 
     # Generate password
     password = _gen_password()
@@ -75,10 +75,10 @@ def gen_email_address(domain: str = "webkarya.net") -> str:
         local = fake.user_name()
     else:
         # Fallback: random string
-        local = "".join(random.choices(string.ascii_lowercase, k=8))
+        local = "".join(secrets.choice(string.ascii_lowercase) for _ in range(8))
 
     # Add random number
-    local += str(random.randint(10, 99))
+    local += str(secrets.randbelow(90) + 10)
 
     return f"{local}@{domain}"
 
@@ -95,11 +95,11 @@ def _gen_password(length: int = 16) -> str:
     # Ensure at least one of each type
     chars = string.ascii_letters + string.digits + "!@#$%&*"
     password = [
-        random.choice(string.ascii_uppercase),
-        random.choice(string.ascii_lowercase),
-        random.choice(string.digits),
-        random.choice("!@#$%&*"),
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice("!@#$%&*"),
     ]
-    password.extend(random.choice(chars) for _ in range(length - 4))
-    random.shuffle(password)
+    password.extend(secrets.choice(chars) for _ in range(length - 4))
+    secrets.SystemRandom().shuffle(password)
     return "".join(password)

@@ -17,6 +17,7 @@ import random
 import time
 from typing import Optional
 
+from .auth.credentials import mask_value
 from .infra import config
 from .infra.tempik import TempikClient
 from .captcha.slider import SliderSolver, ManualSolver
@@ -155,6 +156,7 @@ async def register_and_verify(
     config.SCREENSHOTS_DIR.mkdir(exist_ok=True)
     slider_solver = SliderSolver(max_attempts=config.MAX_CAPTCHA_ATTEMPTS)
     manual_solver = ManualSolver(timeout=config.CAPTCHA_TIMEOUT)
+    suffix = f"_{acct_num}" if acct_num else ""
 
     try:
         # ═══ STEP 1: Navigate to PatewayAI ═══
@@ -178,7 +180,30 @@ async def register_and_verify(
 
         # Wait for modal with human-like patience
         await human_think("careful")
-        await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=15000)
+        await page.wait_for_timeout(3000)
+        await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"after_get_started{suffix}.png"))
+        
+        # Debug: check what page we're on
+        current_url = page.url
+        page_title = await page.title()
+        log_debug(f"After Get Started — URL: {current_url}, Title: {page_title}")
+
+        try:
+            await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=10000)
+        except Exception:
+            log_warn("Email input not found after Get Started — trying direct navigation to signup")
+            # Try direct navigation to signup/register page
+            try:
+                await page.goto(f"{config.PATEWAY_URL}/#/signup", wait_until="networkidle", timeout=15000)
+                await human_think("reading")
+                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"after_signup_nav{suffix}.png"))
+            except Exception:
+                pass
+            try:
+                await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=10000)
+            except Exception:
+                log_err("Still cannot find email input — page structure may have changed")
+                return None
 
         # Simulate reading the modal
         await human_think("reading")
@@ -201,13 +226,67 @@ async def register_and_verify(
         send_code_btn = page.locator('button:has-text("Send code"), button:has-text("发送")').first
         await human_click(page, send_code_btn, timeout=5000)
 
-        # Wait for captcha to appear
+        # Wait for response
         await human_think("careful")
-        await asyncio.sleep(random.uniform(2, 4))
+        await asyncio.sleep(random.uniform(2, 3))
+
+        # Check for error messages after clicking "Send code"
+        # Use JS to find error text within the modal/form context only
+        try:
+            error_text = await page.evaluate("""() => {
+                const modal = document.querySelector('[class*="modal"], [class*="dialog"], form');
+                const root = modal || document.body;
+                const errorSelectors = [
+                    '.toast-error', '.alert-error', '.el-message--error',
+                    '[class*="error-msg"]', '[class*="errorMsg"]', '[class*="error-text"]',
+                ];
+                for (const sel of errorSelectors) {
+                    const el = root.querySelector(sel);
+                    if (el && el.offsetParent !== null && el.textContent.trim()) {
+                        return el.textContent.trim();
+                    }
+                }
+                return null;
+            }""")
+            if error_text:
+                log_err(f"Send code failed: {error_text}")
+                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png"))
+                return None
+        except Exception:
+            pass
+
+        # Check if CAPTCHA appeared (means email was accepted)
+        # Use specific CAPTCHA selectors to avoid false positives from canvas/verify elements
+        captcha_visible = False
+        try:
+            captcha_visible = await page.evaluate("""() => {
+                const captchaSelectors = [
+                    '[class*="captcha"]', '[id*="captcha"]',
+                    '[class*="slider-puzzle"]', '[class*="geetest"]',
+                    '[class*="nc_wrapper"]', '[class*="verify-wrap"]',
+                ];
+                for (const sel of captchaSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetParent !== null) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 50 && rect.height > 30) return true;
+                    }
+                }
+                return false;
+            }""")
+        except Exception:
+            pass
+
+        if not captcha_visible:
+            page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
+            log_err("No CAPTCHA appeared after Send code. Email may be rejected.")
+            log_debug(f"Page text: {page_text[:300]}")
+            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"no_captcha{suffix}.png"))
+            return None
 
         # ═══ STEP 4: Solve slider CAPTCHA ═══
         log_step(4, 7, "Solving slider CAPTCHA...")
-        await page.screenshot(path=str(config.SCREENSHOTS_DIR / "before_captcha.png"))
+        await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"before_captcha{suffix}.png"))
 
         if manual_captcha:
             captcha_ok = await manual_solver.solve(page)
@@ -219,13 +298,13 @@ async def register_and_verify(
 
         if not captcha_ok:
             log_err("CAPTCHA solve failed!")
-            await page.screenshot(path=str(config.SCREENSHOTS_DIR / "captcha_fail.png"))
+            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"captcha_fail{suffix}.png"))
             return None
 
         # Wait after captcha solve (email being sent)
         await human_think("reading")
         await asyncio.sleep(random.uniform(2, 4))
-        await page.screenshot(path=str(config.SCREENSHOTS_DIR / "after_captcha.png"))
+        # Don't screenshot here — OTP/password fields may be visible
 
         # ═══ STEP 5: Enter OTP and password ═══
         log_step(5, 7, "Waiting for OTP...")
@@ -246,7 +325,7 @@ async def register_and_verify(
                     log(f"   - From: {msg.get('from_address')}, Subject: {msg.get('subject')}")
             except Exception as e:
                 log(f"   Error checking messages: {e}")
-            await page.screenshot(path=str(config.SCREENSHOTS_DIR / "otp_timeout.png"))
+            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"otp_timeout{suffix}.png"))
             return None
 
         log_ok(f"OTP received: {otp}")
@@ -255,7 +334,7 @@ async def register_and_verify(
         await human_think("careful")
 
         # Fill OTP
-        log_step(6, 7, "Entering OTP and password...")
+        log_step(5, 7, "Entering OTP and password...")
         otp_inputs = page.locator('input[maxlength="1"]')
         otp_count = await otp_inputs.count()
 
@@ -342,8 +421,11 @@ async def register_and_verify(
                 }
                 const darkBtns = document.querySelectorAll('.btn--dark');
                 for (const btn of darkBtns) {
-                    btn.click();
-                    return true;
+                    const t = btn.textContent.toLowerCase();
+                    if (t.includes('sign') || t.includes('注册') || t.includes('submit') || t.includes('confirm')) {
+                        btn.click();
+                        return true;
+                    }
                 }
                 return false;
             }""")
@@ -352,12 +434,12 @@ async def register_and_verify(
         await human_think("careful")
         await asyncio.sleep(random.uniform(2, 4))
 
-        await page.screenshot(path=str(config.SCREENSHOTS_DIR / "after_signup.png"))
+        # Don't screenshot after signup — page may show session tokens
 
         # ═══ STEP 6: Verify account creation ═══
         log_step(7, 7, "Verifying account creation...")
 
-        # Wait like a human waiting for page to load
+        # Wait for automatic redirect to /#/console/keys
         await human_think("reading")
         await asyncio.sleep(random.uniform(2, 4))
 
@@ -369,52 +451,40 @@ async def register_and_verify(
         )
         page_text_lower = page_text.lower()
 
-        is_dashboard = "/dashboard" in current_url or "/console" in current_url
+        # Check for "Account created" modal with "Get started" button
         has_created_modal = "account created" in page_text_lower or "注册成功" in page_text_lower
-        has_credits = "credits" in page_text_lower or "奖励" in page_text_lower
-        has_referral = "referral" in page_text_lower or "?aff=" in current_url
-
-        if is_dashboard:
-            log_ok("On dashboard - account created!")
-        elif has_created_modal:
+        if has_created_modal:
             log_ok("Account created modal detected!")
             try:
                 get_started_btn = page.locator('button:has-text("Get started"), button:has-text("开始")').first
                 await human_click(page, get_started_btn, timeout=5000)
                 await human_think("normal")
+                await asyncio.sleep(random.uniform(2, 3))
+                current_url = page.url
             except Exception:
                 log_debug("No 'Get started' button found")
-        elif has_credits or has_referral:
-            log_ok("Account appears to be created (credits/referral detected)")
-            console_urls = [
-                f"{config.PATEWAY_URL}/console",
-                f"{config.PATEWAY_URL}/dashboard",
-                f"{config.PATEWAY_URL}/#/console",
-                f"{config.PATEWAY_URL}/#/dashboard",
-                f"{config.PATEWAY_URL}/#/api-keys",
-            ]
-            for url in console_urls:
-                try:
-                    log(f"   Trying: {url}")
-                    await page.goto(url, wait_until="networkidle", timeout=10000)
-                    await human_think("normal")
-                    page_text = await page.evaluate(
-                        "() => document.body?.innerText?.substring(0, 200) || ''"
-                    )
-                    if "404" not in page_text and "not found" not in page_text.lower():
-                        log_ok(f"Navigated to: {page.url}")
-                        break
-                except Exception:
-                    continue
+
+        # Verify we landed on the console/keys page
+        is_on_console = "/console" in current_url or "/#/console" in current_url
+        if is_on_console:
+            log_ok(f"Account created! On console page: {current_url}")
         else:
-            log_warn("Could not confirm account creation, continuing...")
+            log_warn(f"Expected console redirect but got: {current_url}")
+            # Navigate directly to the keys page
+            try:
+                await page.goto(f"{config.PATEWAY_URL}/#/console/keys", wait_until="networkidle", timeout=15000)
+                await human_think("normal")
+                current_url = page.url
+                log_ok(f"Navigated to: {current_url}")
+            except Exception:
+                log_err("Failed to navigate to console/keys page")
 
         await human_think("normal")
 
         # ═══ STEP 7: Create API key ═══
-        api_key = await create_api_key(page)
+        api_key = await create_api_key(page, acct_num=acct_num)
         if api_key:
-            log_ok(f"API Key captured: {api_key[:20]}...")
+            log_ok(f"API Key captured: {mask_value(api_key)}")
             return api_key
         else:
             log_err("Failed to capture API key")
@@ -423,14 +493,15 @@ async def register_and_verify(
     except Exception as e:
         log_err(f"Registration error: {e}")
         try:
-            await page.screenshot(path=str(config.SCREENSHOTS_DIR / "error.png"))
+            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"error{suffix}.png"))
         except Exception:
             pass
         return None
 
 
-async def create_api_key(page) -> Optional[str]:
+async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
     """Create and capture API key from Console with human-like behavior."""
+    suffix = f"_{acct_num}" if acct_num else ""
     captured_key = None
 
     async def on_response(response):
@@ -444,58 +515,34 @@ async def create_api_key(page) -> Optional[str]:
                 match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body_str)
                 if match:
                     captured_key = match.group(0)
-                    log_ok(f"API key intercepted from response: {captured_key[:20]}...")
+                    log_ok(f"API key intercepted from response: {mask_value(captured_key)}")
         except Exception:
             pass
 
     page.on("response", on_response)
 
     try:
-        log("   Navigating to API Keys...")
+        log("   Preparing to create API key...")
         await human_think("normal")
 
         current_url = page.url
-        page_text = await page.evaluate(
-            "() => document.body?.innerText?.substring(0, 200) || ''"
-        )
 
-        is_valid_page = "404" not in page_text and "not found" not in page_text.lower()
-        is_console = "/console" in current_url or "/dashboard" in current_url or "/api-keys" in current_url
-
-        if not is_valid_page or not is_console:
-            log("   Not on console page, navigating directly...")
-            console_urls = [
-                f"{config.PATEWAY_URL}/console",
-                f"{config.PATEWAY_URL}/dashboard",
-                f"{config.PATEWAY_URL}/#/console",
-                f"{config.PATEWAY_URL}/#/dashboard",
-                f"{config.PATEWAY_URL}/#/api-keys",
-            ]
-            for url in console_urls:
-                try:
-                    log(f"   Trying: {url}")
-                    await page.goto(url, wait_until="networkidle", timeout=10000)
-                    await human_think("reading")
-                    page_text = await page.evaluate(
-                        "() => document.body?.innerText?.substring(0, 200) || ''"
-                    )
-                    if "404" not in page_text and "not found" not in page_text.lower():
-                        log_ok(f"Navigated to: {page.url}")
-                        break
-                except Exception:
-                    continue
-
-        # Look for API Keys link
-        try:
-            api_keys_link = page.locator('text="API Keys"').first
-            await human_click(page, api_keys_link, timeout=5000)
-            await human_think("normal")
-        except Exception:
-            log_debug("Could not click API Keys link")
+        # Verify we're on the console/keys page
+        is_console = "/console" in current_url or "/#/console" in current_url
+        if not is_console:
+            log_warn(f"Not on console page ({current_url}), navigating to keys page...")
+            try:
+                await page.goto(f"{config.PATEWAY_URL}/#/console/keys", wait_until="networkidle", timeout=15000)
+                await human_think("reading")
+                current_url = page.url
+                log_ok(f"Navigated to: {current_url}")
+            except Exception:
+                log_err("Failed to navigate to console/keys page")
+                return None
 
         await human_think("reading")
 
-        await page.screenshot(path=str(config.SCREENSHOTS_DIR / "before_create_key.png"))
+        await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"before_create_key{suffix}.png"))
 
         page_text = await page.evaluate(
             "() => document.body?.innerText?.substring(0, 500) || ''"
@@ -585,6 +632,13 @@ async def create_api_key(page) -> Optional[str]:
             captured_key = await _extract_key_from_clipboard(page)
 
         if captured_key:
+            # Save key to a nonlocal so caller can persist before modal closes
+            _key_ready_callback = getattr(page, "_on_key_captured", None)
+            if _key_ready_callback:
+                try:
+                    await _key_ready_callback(captured_key)
+                except Exception:
+                    pass
             try:
                 done_btn = page.locator(
                     'button:has-text("Done"), button:has-text("Close"), button:has-text("完成")'

@@ -15,17 +15,17 @@ from ..utils.logger import log, log_debug
 @asynccontextmanager
 async def launch_browser(
     headless: bool = True,
-    window_width: int = 900,
-    window_height: int = 600,
     proxy: Optional[str] = None,
+    viewport_width: int = 1280,
+    viewport_height: int = 720,
 ):
     """Launch Camoufox browser with anti-detect settings.
 
     Args:
         headless: Run in headless mode.
-        window_width: Browser window width.
-        window_height: Browser window height.
         proxy: Proxy URL (socks5://host:port or http://host:port).
+        viewport_width: Page viewport width (set after launch).
+        viewport_height: Page viewport height (set after launch).
 
     Yields:
         Browser instance.
@@ -54,8 +54,12 @@ async def setup_page(page):
     Args:
         page: Playwright page object.
     """
-    # Set viewport
-    await page.set_viewport_size({"width": 1280, "height": 720})
+    # Set viewport (Camoufox manages window size; viewport follows)
+    try:
+        vp = page.viewport_size or {"width": 1280, "height": 720}
+        await page.set_viewport_size(vp)
+    except Exception:
+        await page.set_viewport_size({"width": 1280, "height": 720})
 
     # Set realistic user agent (Camoufox handles this, but we can override)
     # await page.set_extra_http_headers({
@@ -83,8 +87,8 @@ async def tile_all_camoufox_windows():
         return
 
     try:
-        from .window_tiler import tile_all_camoufox_windows as tile
+        from .window_tiler import tile_all_camoufox_windows_async as tile_async
 
-        tile()
+        await tile_async()
     except Exception:
         pass

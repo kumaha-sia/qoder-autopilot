@@ -5,6 +5,7 @@ Logger — ANSI Colored Structured Logging
 Provides colored log output for CLI.
 """
 
+import contextvars
 import os
 import sys
 from typing import Optional
@@ -40,7 +41,7 @@ class Colors:
 
 # Verbosity levels
 _verbosity = 1  # 0=quiet, 1=normal, 2=debug
-_account_tag = ""
+_account_tag_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("_account_tag", default="")
 _log_file = None
 
 
@@ -52,8 +53,7 @@ def set_verbosity(level: int):
 
 def set_account_tag(tag: str):
     """Set account tag for parallel mode logging."""
-    global _account_tag
-    _account_tag = tag
+    _account_tag_ctx.set(tag)
 
 
 def set_log_file(path: str):
@@ -95,7 +95,7 @@ def log(message: str):
     """Log a standard message."""
     if _verbosity < 1:
         return
-    tag = f"{_account_tag} " if _account_tag else ""
+    tag = f"{_account_tag_ctx.get()} " if _account_tag_ctx.get() else ""
     _write_log(f"{tag}{message}")
 
 
@@ -103,13 +103,13 @@ def log_ok(message: str):
     """Log a success message."""
     if _verbosity < 1:
         return
-    tag = f"{_account_tag} " if _account_tag else ""
+    tag = f"{_account_tag_ctx.get()} " if _account_tag_ctx.get() else ""
     _write_log(f"{tag}{Colors.GREEN}✅ {message}{Colors.RESET}")
 
 
 def log_err(message: str):
     """Log an error message."""
-    tag = f"{_account_tag} " if _account_tag else ""
+    tag = f"{_account_tag_ctx.get()} " if _account_tag_ctx.get() else ""
     _write_log(f"{tag}{Colors.RED}❌ {message}{Colors.RESET}")
 
 
@@ -117,7 +117,7 @@ def log_warn(message: str):
     """Log a warning message."""
     if _verbosity < 1:
         return
-    tag = f"{_account_tag} " if _account_tag else ""
+    tag = f"{_account_tag_ctx.get()} " if _account_tag_ctx.get() else ""
     _write_log(f"{tag}{Colors.YELLOW}⚠️  {message}{Colors.RESET}")
 
 
@@ -125,7 +125,7 @@ def log_step(current: int, total: int, message: str):
     """Log a step in a multi-step process."""
     if _verbosity < 1:
         return
-    tag = f"{_account_tag} " if _account_tag else ""
+    tag = f"{_account_tag_ctx.get()} " if _account_tag_ctx.get() else ""
     if total > 0:
         _write_log(f"{tag}{Colors.CYAN}📋 Step {current}/{total}: {message}{Colors.RESET}")
     else:
@@ -136,7 +136,7 @@ def log_debug(message: str):
     """Log a debug message (only in verbose mode)."""
     if _verbosity < 2:
         return
-    tag = f"{_account_tag} " if _account_tag else ""
+    tag = f"{_account_tag_ctx.get()} " if _account_tag_ctx.get() else ""
     _write_log(f"{tag}{Colors.DIM}🔍 {message}{Colors.RESET}")
 
 
