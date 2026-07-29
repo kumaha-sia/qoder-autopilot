@@ -70,3 +70,5 @@ htmlcov/
 *.bak
 *.orig
 _archive/
+
+pateway_accounts.json
