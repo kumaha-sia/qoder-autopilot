@@ -208,6 +208,8 @@ settings = Settings()
 _EXPORT_MAP = {
     "TEMPIK_URL": "tempik_url",
     "MAIL_PROVIDER": "mail_provider",
+    "GMAIL_EMAIL": "gmail_email",
+    "GMAIL_APP_PASSWORD": "gmail_app_password",
     "PATEWAY_URL": "pateway_url",
     "PATEWAY_API_URL": "pateway_api_url",
     "OTP_TIMEOUT": "otp_timeout",
