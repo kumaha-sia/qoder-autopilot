@@ -564,19 +564,19 @@ async def register_and_verify(
             except Exception:
                 log_debug("No invite code field found")
 
-        # Check ToS checkbox — Ant Design uses React state, so we must trigger
-        # the React onChange handler. Simple .click() on the wrapper is the most
-        # reliable way. Force-click the visible wrapper, then verify checkbox state.
+        # Check ToS checkbox — From the actual PatewayAI UI, the checkbox text is:
+        # "By signing up, you agree to our Terms of Service and Privacy Policy"
+        # The checkbox is an Ant Design checkbox that sits ABOVE the Sign up button.
+        # We must trigger the React onChange by clicking the wrapper element.
         await human_think("normal")
         checkbox_checked = False
         for attempt in range(3):
             try:
-                # Method 1: Click the Ant Design checkbox wrapper
+                # Method 1: Click the Ant Design checkbox wrapper (the visible clickable area)
                 checkbox_wrapper = page.locator('.ant-checkbox-wrapper, label:has(input[type="checkbox"])').first
                 if await checkbox_wrapper.is_visible(timeout=2000):
                     await checkbox_wrapper.click(force=True)
                     await asyncio.sleep(0.5)
-                    # Verify checkbox is now checked
                     is_checked = await page.evaluate(
                         "() => document.querySelector('input[type=\"checkbox\"]')?.checked || false"
                     )
@@ -586,7 +586,22 @@ async def register_and_verify(
             except Exception:
                 pass
 
-            # Method 2: JS click the native input
+            # Method 2: Click the checkbox text label (e.g. "By signing up, you agree...")
+            try:
+                tos_label = page.locator('label:has-text("Terms"), span:has-text("Terms")').first
+                if await tos_label.is_visible(timeout=2000):
+                    await tos_label.click(force=True)
+                    await asyncio.sleep(0.5)
+                    is_checked = await page.evaluate(
+                        "() => document.querySelector('input[type=\"checkbox\"]')?.checked || false"
+                    )
+                    if is_checked:
+                        checkbox_checked = True
+                        break
+            except Exception:
+                pass
+
+            # Method 3: JS click the native input
             try:
                 await page.evaluate("""() => {
                     const cb = document.querySelector('input[type="checkbox"]');
@@ -609,41 +624,35 @@ async def register_and_verify(
         await human_scroll(page, "down", random.randint(100, 300))
         await human_think("normal")
 
-        # Click "Sign up" — use JS click to avoid pointer interception.
-        # Also wait for the button to be enabled (not disabled by form validation).
+        # Click "Sign up" — From the actual PatewayAI UI, this is:
+        # <button type="submit" class="...ant-btn-primary ant-btn-block auth-submit-btn">Sign up now</button>
+        # The button is disabled until form is valid (OTP + password + checkbox checked).
+        # We must wait for it to be enabled, then click.
         log("   Clicking Sign up button...")
         signup_clicked = False
-        for attempt in range(3):
+        for attempt in range(5):
             # Check if signup button is enabled
-            btn_enabled = await page.evaluate("""() => {
-                const buttons = document.querySelectorAll('button');
+            btn_state = await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button[type="submit"], button');
                 for (const btn of buttons) {
                     const t = btn.textContent.toLowerCase().trim();
-                    if ((t.includes('sign up') || t.includes('注册')) && !btn.disabled) {
-                        return true;
+                    if (t.includes('sign up') || t.includes('注册')) {
+                        return { enabled: !btn.disabled, text: btn.textContent.trim() };
                     }
                 }
-                return false;
+                return { enabled: false, text: '' };
             }""")
-            if not btn_enabled:
-                log_debug(f"Sign up button disabled (attempt {attempt+1}/3), waiting...")
+            if not btn_state.get("enabled"):
+                log_debug(f"Sign up button disabled (attempt {attempt+1}/5), waiting...")
                 await asyncio.sleep(2)
                 continue
 
-            # Click via JS
+            # Click via JS — dispatch React-compatible click event
             await page.evaluate("""() => {
-                const buttons = document.querySelectorAll('button');
+                const buttons = document.querySelectorAll('button[type="submit"], button');
                 for (const btn of buttons) {
                     const t = btn.textContent.toLowerCase().trim();
                     if ((t.includes('sign up') || t.includes('注册')) && !btn.disabled) {
-                        btn.click();
-                        return true;
-                    }
-                }
-                const darkBtns = document.querySelectorAll('.btn--dark');
-                for (const btn of darkBtns) {
-                    const t = btn.textContent.toLowerCase().trim();
-                    if ((t.includes('sign') || t.includes('注册') || t.includes('submit') || t.includes('confirm')) && !btn.disabled) {
                         btn.click();
                         return true;
                     }
@@ -654,9 +663,9 @@ async def register_and_verify(
             break
 
         if not signup_clicked:
-            log_warn("Sign up button still disabled after 3 attempts — trying JS click anyway")
+            log_warn("Sign up button still disabled after retries — trying click anyway")
             await page.evaluate("""() => {
-                const buttons = document.querySelectorAll('button');
+                const buttons = document.querySelectorAll('button[type="submit"], button');
                 for (const btn of buttons) {
                     const t = btn.textContent.toLowerCase().trim();
                     if (t.includes('sign up') || t.includes('注册')) {
@@ -690,18 +699,26 @@ async def register_and_verify(
             page_text_lower = page_text.lower()
 
             # Check for success indicators
-            has_created_modal = "account created" in page_text_lower or "注册成功" in page_text_lower
+            # From actual PatewayAI UI: "Account created" with "◆3 reward has been added"
+            has_created_modal = (
+                "account created" in page_text_lower
+                or "注册成功" in page_text_lower
+                or "reward has been added" in page_text_lower
+            )
             has_error = "failed" in page_text_lower and "sign up" in page_text_lower
 
             if has_created_modal:
                 log_ok("Account created modal detected!")
+                # Wait for modal animation to complete
+                await asyncio.sleep(2)
                 try:
-                    # Click "Get started" via JS to avoid pointer interception
+                    # Click "Get started" button in the success modal
+                    # From actual UI: <button>Get started</button> inside the modal
                     await page.evaluate("""() => {
                         const buttons = document.querySelectorAll('button, a');
                         for (const btn of buttons) {
                             const t = btn.textContent.toLowerCase().trim();
-                            if (t.includes('get started') || t.includes('开始')) {
+                            if (t === 'get started' || t.includes('开始')) {
                                 btn.click();
                                 return true;
                             }
@@ -709,6 +726,7 @@ async def register_and_verify(
                         return false;
                     }""")
                     log("   Waiting for redirect to Console...")
+                    await asyncio.sleep(3)
                 except Exception:
                     log_debug("No 'Get started' button found")
                 signup_success = True
@@ -875,19 +893,15 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
                     continue
 
             if key_name_input:
-                await human_click(page, key_name_input)
-                await key_name_input.fill("")
-                await human_type(page, key_name, min_delay=60, max_delay=150)
-                await human_think("normal")
+                await key_name_input.fill(key_name)
+                log_debug(f"Key name set to: {key_name}")
             else:
                 log_warn("Key name input not found with specific selectors, trying broader search...")
                 # Last resort: any visible text input inside the page
                 inputs = page.locator('input[type="text"]:visible')
                 count = await inputs.count()
                 if count > 0:
-                    await human_click(page, inputs.first)
-                    await inputs.first.fill("")
-                    await human_type(page, key_name, min_delay=60, max_delay=150)
+                    await inputs.first.fill(key_name)
                 else:
                     log_err("Could not find any input for key name")
                     await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"no_key_input{suffix}.png"))
@@ -922,7 +936,9 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
                     continue
 
             if create_btn:
-                await human_click(page, create_btn, timeout=10000)
+                # Use JS click instead of human_click — the button may be overlapped
+                # by modal elements, and we need to trigger React's onClick handler
+                await create_btn.click(force=True)
             else:
                 log_warn("Create button not found, trying JS click...")
                 await page.evaluate("""() => {
@@ -947,12 +963,25 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
         await asyncio.sleep(random.uniform(3, 5))
 
         # Wait for "Key Created" modal to appear
+        # From actual PatewayAI UI: modal with "Key Created" title, green check icon,
+        # and API key displayed as "sk-ptw-..."
         log("   Waiting for Key Created modal...")
         try:
-            await page.wait_for_selector('[class*="modal"], [role="dialog"]', timeout=10000)
+            # Wait for the key created modal text to appear
+            await page.wait_for_selector(
+                'text="Key Created", text="key created"',
+                timeout=10000
+            )
+            log_ok("Key Created modal detected")
             await human_think("reading")
         except Exception:
-            log_warn("Key Created modal not detected")
+            log_warn("Key Created modal not detected, trying broader search...")
+            # Broader: check if API key text is visible on page
+            try:
+                await page.wait_for_selector("text=/sk-ptw-/", timeout=5000)
+                log_ok("API key text found on page")
+            except Exception:
+                log_warn("No API key text found on page")
 
         # Try to capture API key
         if not captured_key:
@@ -965,14 +994,21 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
 
         if captured_key:
             log_ok(f"API Key captured: {mask_value(captured_key)}")
-            # Click "Done, close" to dismiss modal
+            # Click "Done, close" to dismiss the Key Created modal
             try:
-                done_btn = page.locator(
-                    'button:has-text("Done"), button:has-text("Close"), button:has-text("完成")'
-                ).first
-                await human_click(page, done_btn, timeout=3000)
+                await page.evaluate("""() => {
+                    const buttons = document.querySelectorAll('button');
+                    for (const btn of buttons) {
+                        const t = btn.textContent.toLowerCase().trim();
+                        if (t.includes('done') || t.includes('close') || t.includes('完成')) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""")
             except Exception:
-                log_debug("Done/Close button not found")
+                pass
         else:
             log_err("Could not capture API key from any method")
 
