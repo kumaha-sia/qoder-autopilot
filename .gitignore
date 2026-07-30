@@ -72,3 +72,5 @@ htmlcov/
 _archive/
 
 pateway_accounts.json
+
+proxies.txt
