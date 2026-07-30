@@ -125,11 +125,21 @@ class Settings(BaseSettings):
     # ── Temp Mail ───────────────────────────────────────────────────────
     mail_provider: str = Field(
         default="mail.tm",
-        description="Temp mail provider: mail.tm, 1secmail, or tempik",
+        description="Temp mail provider: mail.tm, guerrilla, 1secmail, tempik, or gmail",
     )
     tempik_url: str = Field(
         default="https://tempik.webkarya.net/api",
         description="Tempik API base URL (only used if mail_provider=tempik)",
+    )
+
+    # ── Gmail (for dot/plus trick + IMAP auto-OTP) ────────────────────
+    gmail_email: str = Field(
+        default="",
+        description="Your Gmail address for dot/plus alias generation",
+    )
+    gmail_app_password: str = Field(
+        default="",
+        description="Gmail App Password (16 chars) for IMAP auto-OTP",
     )
 
     # ── PatewayAI URLs ────────────────────────────────────────────────

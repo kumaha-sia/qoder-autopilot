@@ -74,18 +74,22 @@ async def run_one(
 
     # 1. Generate email
     temp_mail = None
-    if user_email:
+    # Use config values as defaults, CLI args as overrides
+    effective_email = user_email or config.GMAIL_EMAIL
+    effective_password = gmail_password or config.GMAIL_APP_PASSWORD
+
+    if effective_email:
         # If Gmail with app password → use IMAP for auto OTP
-        if "gmail.com" in user_email.lower() or "googlemail.com" in user_email.lower():
+        if "gmail.com" in effective_email.lower() or "googlemail.com" in effective_email.lower():
             from .infra.email_gen import GmailAliasGenerator
-            gen = GmailAliasGenerator(user_email, method="combined", prefix="pateway")
+            gen = GmailAliasGenerator(effective_email, method="combined", prefix="pateway")
             email = gen.get(acct_num) if acct_num > 0 else gen.next()
             log_ok(f"Gmail alias: {email}")
 
-            if gmail_password:
+            if effective_password:
                 from .infra.gmail_imap import GmailImapClient
                 try:
-                    temp_mail = GmailImapClient(user_email, gmail_password)
+                    temp_mail = GmailImapClient(effective_email, effective_password)
                     await temp_mail.create()
                     log_ok(f"Gmail IMAP connected — OTP will be auto-read")
                 except Exception as e:
@@ -94,7 +98,7 @@ async def run_one(
             else:
                 log_warn("No Gmail app password — OTP must be entered manually")
         else:
-            email = user_email
+            email = effective_email
             log_ok(f"Using provided email: {email}")
     else:
         log("📋 Step 1/3: Generating temp email...")
@@ -499,8 +503,9 @@ def _handle_config_command(argv: list[str]) -> None:
         print()
         print("Configurable keys:")
         keys = [
-            ("tempik-url", "Tempik API base URL"),
-            ("tempik-domain", "Email domain for temp addresses"),
+            ("gmail-email", "Your Gmail address (for dot/plus alias + auto OTP)"),
+            ("gmail-app-password", "Gmail App Password (16 chars) for IMAP auto-OTP"),
+            ("mail-provider", "Temp mail provider: mail.tm, guerrilla, 1secmail, tempik"),
             ("otp-timeout", "Max seconds to wait for OTP"),
             ("captcha-timeout", "Max seconds for manual captcha"),
             ("parallel-delay", "Delay between sequential accounts"),
@@ -522,14 +527,15 @@ def _handle_config_command(argv: list[str]) -> None:
         print(f"{'Setting':<25} {'Value':<50} {'Source':<10}")
         print("─" * 85)
         for key in [
-            "tempik_url", "tempik_domain", "otp_timeout",
-            "captcha_timeout", "parallel_delay", "key_name", "invite_code",
+            "gmail_email", "gmail_app_password", "mail_provider",
+            "otp_timeout", "captcha_timeout", "parallel_delay", "key_name", "invite_code",
         ]:
             cli = key.replace("_", "-")
             current = getattr(settings, key, None)
             source = "config" if key in cfg else "default"
             val_str = str(current) if current else "(empty)"
-            if "invite" in key and val_str:
+            # Mask sensitive fields
+            if any(s in key for s in ("invite", "password", "app_password")) and val_str and val_str != "(empty)":
                 val_str = val_str[:4] + "••••" if len(val_str) > 4 else "***"
             print(f"  {cli:<23} {val_str:<50} {source}")
         print()
@@ -540,10 +546,12 @@ def _handle_config_command(argv: list[str]) -> None:
             print("Usage: pateway-autopilot config set <key> <value>")
             sys.exit(1)
         cli_flag = argv[1]
-        value = argv[2]
+        # Support multi-word values (e.g., gmail app password with spaces)
+        value = " ".join(argv[2:]) if len(argv) > 3 else argv[2]
         key_map = {
-            "tempik-url": ("tempik_url", str),
-            "tempik-domain": ("tempik_domain", str),
+            "gmail-email": ("gmail_email", str),
+            "gmail-app-password": ("gmail_app_password", str),
+            "mail-provider": ("mail_provider", str),
             "otp-timeout": ("otp_timeout", int),
             "captcha-timeout": ("captcha_timeout", int),
             "parallel-delay": ("parallel_delay", int),
