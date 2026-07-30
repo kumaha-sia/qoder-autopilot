@@ -413,25 +413,29 @@ async def register_and_verify(
         # Simulate human looking at OTP and thinking
         await human_think("careful")
 
-        # Fill OTP
+        # Fill OTP — PatewayAI uses single input field (not per-digit)
         log_step(5, 7, "Entering OTP and password...")
-        otp_inputs = page.locator('input[maxlength="1"]')
-        otp_count = await otp_inputs.count()
-
-        if otp_count >= len(otp):
-            for i, digit in enumerate(otp):
-                await human_click(page, otp_inputs.nth(i))
-                await human_think("typing")
-                await page.keyboard.type(digit, delay=random.randint(80, 200))
-                # Sometimes pause longer between digits
-                if random.random() < 0.3:
-                    await human_delay(200, 500)
-            log_ok("OTP entered!")
-        else:
-            otp_input = page.locator('input[placeholder*="code"], input[placeholder*="OTP"]').first
+        otp_input = page.locator('input[placeholder*="code"], input[placeholder*="OTP"], input[placeholder*="验证"]').first
+        try:
+            await otp_input.wait_for(state="visible", timeout=5000)
             await human_click(page, otp_input)
             await human_type(page, otp, min_delay=80, max_delay=200)
-            log_ok("OTP entered (single input)!")
+            log_ok("OTP entered!")
+        except Exception:
+            # Fallback: try per-digit inputs
+            otp_inputs = page.locator('input[maxlength="1"]')
+            otp_count = await otp_inputs.count()
+            if otp_count >= len(otp):
+                for i, digit in enumerate(otp):
+                    await human_click(page, otp_inputs.nth(i))
+                    await human_think("typing")
+                    await page.keyboard.type(digit, delay=random.randint(80, 200))
+                    if random.random() < 0.3:
+                        await human_delay(200, 500)
+                log_ok("OTP entered (per-digit)!")
+            else:
+                log_err("Could not find OTP input field")
+                return None
 
         # Pause before password
         await human_think("normal")
@@ -536,15 +540,19 @@ async def register_and_verify(
             try:
                 get_started_btn = page.locator('button:has-text("Get started"), button:has-text("开始")').first
                 await human_click(page, get_started_btn, timeout=5000)
-                await human_think("normal")
-                await asyncio.sleep(random.uniform(3, 5))
-                current_url = page.url
-                log(f"   After Get started — URL: {current_url}")
+                log("   Waiting for redirect to Console...")
+                # Wait for PatewayAI to redirect to Console page
+                try:
+                    await page.wait_for_url("**/console**", timeout=15000)
+                    log_ok(f"Redirected to Console: {page.url}")
+                except Exception:
+                    log_debug("Redirect timeout, checking current URL...")
+                    await asyncio.sleep(3)
+                    log(f"   Current URL: {page.url}")
             except Exception:
                 log_debug("No 'Get started' button found")
 
-        # Just wait — PatewayAI handles the redirect automatically
-        log_ok(f"Account created! Current page: {current_url}")
+        log_ok(f"Account created! Current page: {page.url}")
 
         await human_think("normal")
 
@@ -593,13 +601,19 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
         await human_think("normal")
 
         # Wait for console page to fully load (SPA rendering)
-        log("   Waiting for console page to load...")
+        log("   Waiting for Console page to load...")
         try:
-            await page.wait_for_selector('button, table, [class*="key"], [class*="api"]', timeout=15000)
+            # Wait for API Keys table or "Create Key" button to appear
+            await page.wait_for_selector(
+                'button:has-text("Create Key"), table, [class*="api-key"], [class*="empty"]',
+                timeout=15000
+            )
+            log_ok("Console page loaded")
         except Exception:
-            log_warn("Console page elements not detected, continuing anyway...")
-        await asyncio.sleep(2)
+            log_warn("Console page elements not detected, waiting more...")
+            await asyncio.sleep(3)
 
+        await asyncio.sleep(2)
         await human_think("reading")
 
         await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"before_create_key{suffix}.png"))
@@ -656,46 +670,111 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
         key_name = config.KEY_NAME
         log(f"   Setting key name: {key_name}")
         try:
-            # Wait for modal/input to appear after clicking Create Key
-            key_name_input = page.locator(
-                'input[placeholder*="name"], input[placeholder*="Name"], input[id*="name"], input[id*="keyName"]'
-            ).first
-            await key_name_input.wait_for(state="visible", timeout=10000)
+            # Wait for modal to appear
+            await page.wait_for_selector('[class*="modal"], [class*="dialog"], [role="dialog"]', timeout=10000)
+            await human_think("reading")
 
-            await human_click(page, key_name_input)
-            await human_type(page, key_name, min_delay=60, max_delay=150)
-            await human_think("normal")
-        except Exception as e:
-            log_warn(f"Key name input not found: {e}")
-            log_debug("Trying alternative selectors...")
-            # Try any visible input in a modal/dialog
-            try:
-                inputs = page.locator('input:visible')
+            # Find key name input — try multiple selectors
+            key_name_input = None
+            input_selectors = [
+                'input[placeholder*="name"]',
+                'input[placeholder*="Name"]',
+                'input[id*="name"]',
+                'input[id*="keyName"]',
+                'input[placeholder*="prod"]',
+                '[class*="modal"] input[type="text"]',
+                '[role="dialog"] input[type="text"]',
+            ]
+            for sel in input_selectors:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=1000):
+                        key_name_input = el
+                        log_debug(f"Found key name input: {sel}")
+                        break
+                except Exception:
+                    continue
+
+            if key_name_input:
+                # Clear default value and type new name
+                await human_click(page, key_name_input)
+                await key_name_input.fill("")
+                await human_type(page, key_name, min_delay=60, max_delay=150)
+                await human_think("normal")
+            else:
+                log_warn("Key name input not found, trying first visible input...")
+                inputs = page.locator('[class*="modal"] input:visible, [role="dialog"] input:visible')
                 count = await inputs.count()
                 if count > 0:
                     await human_click(page, inputs.first)
+                    await inputs.first.fill("")
                     await human_type(page, key_name, min_delay=60, max_delay=150)
-            except Exception:
-                log_err("Could not find any input for key name")
-                return None
+                else:
+                    log_err("Could not find any input for key name")
+                    return None
+
+        except Exception as e:
+            log_err(f"Key name input error: {e}")
+            return None
 
         log("   Using default Service Mode (Economy)")
 
-        # Click "Create" — wait for it to be visible first
+        # Click "Create" button in modal — be specific to avoid clicking wrong button
         log("   Clicking 'Create'...")
         try:
-            create_btn = page.locator('button:has-text("Create"):not(:has-text("Create Key"))').last
-            await create_btn.wait_for(state="visible", timeout=5000)
-            await human_click(page, create_btn, timeout=10000)
-        except Exception:
-            # Fallback: try any button with "Create" text
-            create_btn = page.locator('button:has-text("Create")').last
-            await human_click(page, create_btn, timeout=10000)
+            # Look for Create button inside modal specifically
+            create_btn = None
+            create_selectors = [
+                '[class*="modal"] button:has-text("Create"):not(:has-text("Key"))',
+                '[role="dialog"] button:has-text("Create"):not(:has-text("Key"))',
+                'button:has-text("Create"):not(:has-text("Key")):not(:has-text("Create Key"))',
+            ]
+            for sel in create_selectors:
+                try:
+                    el = page.locator(sel).last
+                    if await el.is_visible(timeout=2000):
+                        create_btn = el
+                        log_debug(f"Found Create button: {sel}")
+                        break
+                except Exception:
+                    continue
 
-        # Wait for response
+            if create_btn:
+                await human_click(page, create_btn, timeout=10000)
+            else:
+                log_warn("Create button not found, trying JS click...")
+                await page.evaluate("""() => {
+                    const modals = document.querySelectorAll('[class*="modal"], [role="dialog"]');
+                    for (const modal of modals) {
+                        const buttons = modal.querySelectorAll('button');
+                        for (const btn of buttons) {
+                            if (btn.textContent.trim() === 'Create') {
+                                btn.click();
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }""")
+
+            await human_think("normal")
+        except Exception as e:
+            log_err(f"Create button click failed: {e}")
+            return None
+
+        # Wait for API key response
         await human_think("careful")
         await asyncio.sleep(random.uniform(3, 5))
 
+        # Wait for "Key Created" modal to appear
+        log("   Waiting for Key Created modal...")
+        try:
+            await page.wait_for_selector('[class*="modal"], [role="dialog"]', timeout=10000)
+            await human_think("reading")
+        except Exception:
+            log_warn("Key Created modal not detected")
+
+        # Try to capture API key
         if not captured_key:
             log("   Trying UI extraction...")
             captured_key = await _extract_key_from_ui(page)
@@ -705,20 +784,17 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             captured_key = await _extract_key_from_clipboard(page)
 
         if captured_key:
-            # Save key to a nonlocal so caller can persist before modal closes
-            _key_ready_callback = getattr(page, "_on_key_captured", None)
-            if _key_ready_callback:
-                try:
-                    await _key_ready_callback(captured_key)
-                except Exception:
-                    pass
+            log_ok(f"API Key captured: {mask_value(captured_key)}")
+            # Click "Done, close" to dismiss modal
             try:
                 done_btn = page.locator(
                     'button:has-text("Done"), button:has-text("Close"), button:has-text("完成")'
                 ).first
                 await human_click(page, done_btn, timeout=3000)
             except Exception:
-                pass
+                log_debug("Done/Close button not found")
+        else:
+            log_err("Could not capture API key from any method")
 
         return captured_key
 
