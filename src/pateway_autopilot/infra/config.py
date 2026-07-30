@@ -122,19 +122,19 @@ class Settings(BaseSettings):
             data[key] = value
         super().__init__(**data)
 
-    # ── Tempik ─────────────────────────────────────────────────────────
+    # ── Temp Mail ───────────────────────────────────────────────────────
+    mail_provider: str = Field(
+        default="mail.tm",
+        description="Temp mail provider: mail.tm, 1secmail, or tempik",
+    )
     tempik_url: str = Field(
         default="https://tempik.webkarya.net/api",
-        description="Tempik API base URL",
-    )
-    tempik_domain: str = Field(
-        default="webkarya.net",
-        description="Email domain for temp addresses",
+        description="Tempik API base URL (only used if mail_provider=tempik)",
     )
 
     # ── PatewayAI URLs ────────────────────────────────────────────────
     pateway_url: str = Field(
-        default="https://pateway.ai/?aff=9SWQ2B6S",
+        default="https://pateway.ai",
         description="PatewayAI homepage URL",
     )
     pateway_api_url: str = Field(
@@ -197,7 +197,7 @@ settings = Settings()
 
 _EXPORT_MAP = {
     "TEMPIK_URL": "tempik_url",
-    "TEMPIK_DOMAIN": "tempik_domain",
+    "MAIL_PROVIDER": "mail_provider",
     "PATEWAY_URL": "pateway_url",
     "PATEWAY_API_URL": "pateway_api_url",
     "OTP_TIMEOUT": "otp_timeout",

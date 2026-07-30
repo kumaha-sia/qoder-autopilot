@@ -76,6 +76,7 @@ dev = [
 # ── CLI Entry Point ───────────────────────────────
 [project.scripts]
 qoder-autopilot = "qoder_autopilot.cli:main"
+pateway-autopilot = "pateway_autopilot.cli:main"
 
 # ── URLs ──────────────────────────────────────────
 [project.urls]

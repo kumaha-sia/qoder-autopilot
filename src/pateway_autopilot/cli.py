@@ -19,7 +19,8 @@ from .auth.credentials import save_creds, mask_value
 from .auth.identity import gen_identity
 from .browser.camoufox import launch_browser, setup_page
 from .infra import config
-from .infra.tempik import TempikClient
+from .infra.proxies import load_proxies, ProxyRotator
+from .infra.temp_mail import TempMailClient
 from .register import register_and_verify
 from .utils.logger import (
     log,
@@ -41,6 +42,9 @@ async def run_one(
     acct_num: int = 0,
     proxy: str | None = None,
     invite_code: str = "",
+    user_email: str | None = None,
+    mail_provider: str | None = None,
+    gmail_password: str | None = None,
 ) -> dict | None:
     """Register a single PatewayAI account.
 
@@ -68,16 +72,40 @@ async def run_one(
         log("🧑 Manual captcha mode — browser will stay visible")
     log("=" * 60)
 
-    # 1. Generate temp email via Tempik
-    log("📋 Step 1/3: Generating temp email via Tempik...")
-    tempik = TempikClient(base_url=config.TEMPIK_URL)
-    try:
-        edata = await tempik.generate()
-        email = edata["address"]
-        log_ok(f"Email: {email}")
-    except Exception as e:
-        log_err(f"Failed to generate temp email: {e}")
-        return None
+    # 1. Generate email
+    temp_mail = None
+    if user_email:
+        # If Gmail with app password → use IMAP for auto OTP
+        if "gmail.com" in user_email.lower() or "googlemail.com" in user_email.lower():
+            from .infra.email_gen import GmailAliasGenerator
+            gen = GmailAliasGenerator(user_email, method="combined", prefix="pateway")
+            email = gen.get(acct_num) if acct_num > 0 else gen.next()
+            log_ok(f"Gmail alias: {email}")
+
+            if gmail_password:
+                from .infra.gmail_imap import GmailImapClient
+                try:
+                    temp_mail = GmailImapClient(user_email, gmail_password)
+                    await temp_mail.create()
+                    log_ok(f"Gmail IMAP connected — OTP will be auto-read")
+                except Exception as e:
+                    log_warn(f"Gmail IMAP failed: {e} — will use manual OTP")
+                    temp_mail = None
+            else:
+                log_warn("No Gmail app password — OTP must be entered manually")
+        else:
+            email = user_email
+            log_ok(f"Using provided email: {email}")
+    else:
+        log("📋 Step 1/3: Generating temp email...")
+        provider = mail_provider or config.MAIL_PROVIDER
+        temp_mail = TempMailClient(preferred_provider=provider)
+        try:
+            email = await temp_mail.create()
+            log_ok(f"Email: {email} (via {temp_mail.provider})")
+        except Exception as e:
+            log_err(f"Failed to generate temp email: {e}")
+            return None
 
     # 2. Generate identity
     log("📋 Step 2/3: Generating identity...")
@@ -86,9 +114,6 @@ async def run_one(
 
     # 3. Register + create API key
     log("📋 Step 3/3: Registering account + creating API key...")
-
-    # Calculate window size
-    win_w, win_h = 900, 600
 
     async with launch_browser(
         headless=headless,
@@ -101,7 +126,7 @@ async def run_one(
             page,
             email,
             ident,
-            tempik,
+            temp_mail,
             manual_captcha=manual_captcha,
             acct_num=acct_num,
             invite_code=invite_code,
@@ -113,8 +138,9 @@ async def run_one(
         final_url = page.url
         log(f"   📍 Final URL: {final_url}")
 
-    # Close Tempik client
-    await tempik.close()
+    # Close temp mail client
+    if temp_mail:
+        await temp_mail.close()
 
     if not api_key:
         log_err("Registration/API key creation failed!")
@@ -186,8 +212,24 @@ async def main_async(args: argparse.Namespace) -> None:
 
     proxy = args.proxy
     output_format = args.output_format
+    user_email = args.email
+    mail_provider = args.mail_provider
     # Use args.invite_code if provided (even if empty string), else fall back to config
     invite_code = args.invite_code if args.invite_code is not None else config.INVITE_CODE
+
+    # Proxy rotation setup
+    proxy_rotator = None
+    if args.proxy_file:
+        proxy_list = load_proxies(args.proxy_file)
+        if proxy_list:
+            proxy_rotator = ProxyRotator(proxy_list)
+            log(f"🔄 Proxy rotation enabled: {proxy_rotator.count} proxies")
+        else:
+            log_warn("No proxies loaded from file, falling back to single proxy")
+    elif proxy:
+        # Single proxy → wrap in rotator for consistent API
+        proxy_rotator = ProxyRotator([proxy])
+        proxy = None  # Clear single proxy, rotator handles it
 
     # Dry-run mode
     if args.dry_run:
@@ -196,14 +238,17 @@ async def main_async(args: argparse.Namespace) -> None:
         log(f"  Headless: {headless}")
         log(f"  Manual captcha: {manual_captcha}")
         log(f"  Parallel: {parallel}")
+        log(f"  Mail provider: {config.MAIL_PROVIDER}")
+        log(f"  Proxy: {proxy or ('rotation (' + str(proxy_rotator.count) + ' proxies)' if proxy_rotator else 'none')}")
         log(f"  Tempik URL: {config.TEMPIK_URL}")
         log(f"  PatewayAI URL: {config.PATEWAY_URL}")
         return
 
     log_banner()
+    proxy_info = f"proxies={proxy_rotator.count}" if proxy_rotator else f"proxy={proxy or 'none'}"
     log(
         f"🎯 Creating {args.count} account(s) | "
-        f"headless={headless} | manual_captcha={manual_captcha} | parallel={parallel}"
+        f"headless={headless} | manual_captcha={manual_captcha} | parallel={parallel} | {proxy_info}"
     )
 
     if parallel and args.count > 1:
@@ -216,12 +261,15 @@ async def main_async(args: argparse.Namespace) -> None:
         async def staggered_run(i: int) -> dict | None:
             if i > 0:
                 await asyncio.sleep(i * 2)
+            acct_proxy = proxy_rotator.get_for_account(i + 1) if proxy_rotator else None
             return await run_one(
                 headless=headless,
                 manual_captcha=manual_captcha,
                 acct_num=i + 1,
-                proxy=proxy,
+                proxy=acct_proxy,
                 invite_code=invite_code,
+                user_email=user_email,
+                mail_provider=mail_provider,
             )
 
         tasks = [staggered_run(i) for i in range(args.count)]
@@ -235,13 +283,16 @@ async def main_async(args: argparse.Namespace) -> None:
         # SEQUENTIAL MODE
         results = []
         for i in range(args.count):
+            acct_proxy = proxy_rotator.get_for_account(i + 1) if proxy_rotator else None
             log(f"\n{'─' * 60}\n📦 Account {i + 1}/{args.count}\n{'─' * 60}")
             r = await run_one(
                 headless=headless,
                 manual_captcha=manual_captcha,
                 acct_num=i + 1 if args.count > 1 else 0,
-                proxy=proxy,
+                proxy=acct_proxy,
                 invite_code=invite_code,
+                user_email=user_email,
+                mail_provider=mail_provider,
             )
             results.append(r)
             if i < args.count - 1:
@@ -359,6 +410,20 @@ def main() -> None:
         help=f"Delay between sequential accounts (default: {config.PARALLEL_DELAY}s)",
     )
     p.add_argument(
+        "--email",
+        type=str,
+        default=None,
+        metavar="EMAIL",
+        help="Use specific email address instead of auto-generating temp email",
+    )
+    p.add_argument(
+        "--mail-provider",
+        type=str,
+        choices=["mail.tm", "guerrilla", "1secmail", "tempik"],
+        default=None,
+        help="Temp mail provider (default: mail.tm)",
+    )
+    p.add_argument(
         "--invite-code",
         type=str,
         default=None,
@@ -386,7 +451,14 @@ def main() -> None:
         type=str,
         default=None,
         metavar="URL",
-        help="Proxy URL (e.g., socks5://host:port)",
+        help="Single proxy URL (e.g., socks5://host:port)",
+    )
+    p.add_argument(
+        "--proxy-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Proxy list file (host:port:user:pass per line, rotates per account)",
     )
     p.add_argument(
         "--format",

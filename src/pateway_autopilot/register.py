@@ -19,7 +19,7 @@ from typing import Optional
 
 from .auth.credentials import mask_value
 from .infra import config
-from .infra.tempik import TempikClient
+from .infra.temp_mail import TempMailClient
 from .captcha.slider import SliderSolver, ManualSolver
 from .utils.logger import log, log_ok, log_err, log_warn, log_step, log_debug
 
@@ -130,11 +130,82 @@ async def random_mouse_movement(page):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+async def _wait_for_manual_otp(page, timeout: int = 120) -> Optional[str]:
+    """Wait for user to manually enter OTP in the browser.
+
+    Monitors OTP input fields for user entry.
+    Returns the entered OTP string, or None if timeout.
+    """
+    import time
+    start = time.time()
+    log("   ⌨️  Type the OTP code in the browser window...")
+
+    while time.time() - start < timeout:
+        await asyncio.sleep(2)
+
+        # Check if OTP fields have been filled
+        otp_value = await page.evaluate("""() => {
+            // Check individual digit inputs
+            const digitInputs = document.querySelectorAll('input[maxlength="1"]');
+            if (digitInputs.length >= 6) {
+                let code = '';
+                for (const inp of digitInputs) {
+                    if (inp.value) code += inp.value;
+                    else return null;  // Not all filled yet
+                }
+                if (code.length >= 4) return code;
+            }
+            // Check single code input
+            const codeInput = document.querySelector(
+                'input[placeholder*="code"], input[placeholder*="OTP"], input[name*="code"]'
+            );
+            if (codeInput && codeInput.value && codeInput.value.length >= 4) {
+                return codeInput.value;
+            }
+            return null;
+        }""")
+
+        if otp_value:
+            log_ok(f"OTP entered: {otp_value}")
+            return otp_value
+
+        # Check if page progressed (password inputs appeared)
+        has_password = await page.evaluate("""() => {
+            return document.querySelectorAll('input[type="password"]').length > 0;
+        }""")
+
+        if has_password:
+            # Password fields visible means OTP was accepted
+            # Try to extract what was entered
+            otp_value = await page.evaluate("""() => {
+                const digitInputs = document.querySelectorAll('input[maxlength="1"]');
+                if (digitInputs.length >= 4) {
+                    return Array.from(digitInputs).map(i => i.value).join('');
+                }
+                const codeInput = document.querySelector(
+                    'input[placeholder*="code"], input[placeholder*="OTP"]'
+                );
+                return codeInput ? codeInput.value : null;
+            }""")
+            if otp_value:
+                log_ok(f"OTP accepted: {otp_value}")
+                return otp_value
+            log_ok("OTP accepted (password fields visible)")
+            return "manual"  # Signal that OTP was entered
+
+        elapsed = int(time.time() - start)
+        remaining = timeout - elapsed
+        if remaining % 10 < 2:
+            log_debug(f"Waiting for manual OTP... {remaining}s remaining")
+
+    return None
+
+
 async def register_and_verify(
     page,
     email: str,
     identity: dict,
-    tempik: TempikClient,
+    temp_mail: TempMailClient,
     manual_captcha: bool = False,
     acct_num: int = 0,
     invite_code: str = "",
@@ -145,7 +216,7 @@ async def register_and_verify(
         page: Playwright/Camoufox page object.
         email: Temp email address to register with.
         identity: Dict with first_name, last_name, display_name, password.
-        tempik: TempikClient instance for OTP retrieval.
+        temp_mail: TempMailClient instance for OTP retrieval.
         manual_captcha: If True, pause for manual captcha solving.
         acct_num: Account number for logging (parallel mode).
         invite_code: Optional invite code.
@@ -308,25 +379,34 @@ async def register_and_verify(
 
         # ═══ STEP 5: Enter OTP and password ═══
         log_step(5, 7, "Waiting for OTP...")
-        log(f"   Checking Tempik inbox for {email}...")
 
-        # Wait like a human checking their email
-        await human_think("reading")
-        await asyncio.sleep(random.uniform(3, 5))
+        if temp_mail:
+            log(f"   Checking inbox for {email}...")
+            # Wait like a human checking their email
+            await human_think("reading")
+            await asyncio.sleep(random.uniform(3, 5))
+            otp = await temp_mail.wait_for_otp(timeout=config.OTP_TIMEOUT)
 
-        otp = await tempik.wait_for_otp(email, timeout=config.OTP_TIMEOUT)
-
-        if not otp:
-            log_err(f"OTP not received within {config.OTP_TIMEOUT}s")
-            try:
-                messages = await tempik.get_messages(email)
-                log(f"   Found {len(messages)} messages in inbox")
-                for msg in messages:
-                    log(f"   - From: {msg.get('from_address')}, Subject: {msg.get('subject')}")
-            except Exception as e:
-                log(f"   Error checking messages: {e}")
-            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"otp_timeout{suffix}.png"))
-            return None
+            if not otp:
+                log_err(f"OTP not received within {config.OTP_TIMEOUT}s")
+                try:
+                    messages = await temp_mail.get_messages()
+                    log(f"   Found {len(messages)} messages in inbox")
+                    for msg in messages:
+                        log(f"   - From: {msg.get('from_address')}, Subject: {msg.get('subject')}")
+                except Exception as e:
+                    log(f"   Error checking messages: {e}")
+                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"otp_timeout{suffix}.png"))
+                return None
+        else:
+            # User provided their own email — ask for OTP manually
+            log(f"   ⏳ Waiting for OTP to {email}...")
+            log(f"   📧 Check your email inbox and enter the OTP in the browser")
+            # Wait for manual OTP entry
+            otp = await _wait_for_manual_otp(page, timeout=config.OTP_TIMEOUT)
+            if not otp:
+                log_err("Manual OTP entry timeout")
+                return None
 
         log_ok(f"OTP received: {otp}")
 
