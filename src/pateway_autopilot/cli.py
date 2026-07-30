@@ -82,7 +82,7 @@ async def run_one(
         # If Gmail with app password → use IMAP for auto OTP
         if "gmail.com" in effective_email.lower() or "googlemail.com" in effective_email.lower():
             from .infra.email_gen import GmailAliasGenerator
-            gen = GmailAliasGenerator(effective_email, method="combined", prefix="pateway")
+            gen = GmailAliasGenerator(effective_email, method="dot")
             email = gen.get(acct_num) if acct_num > 0 else gen.next()
             log_ok(f"Gmail alias: {email}")
 
@@ -136,8 +136,12 @@ async def run_one(
             invite_code=invite_code,
         )
 
-        # Keep browser open briefly
-        await asyncio.sleep(1)
+        # Keep browser open briefly so user can see what happened
+        if not api_key:
+            log_warn("Registration failed — browser will stay open for 10s for inspection")
+            await asyncio.sleep(10)
+        else:
+            await asyncio.sleep(1)
         await page.screenshot(path=str(config.SCREENSHOTS_DIR / "final_state.png"))
         final_url = page.url
         log(f"   📍 Final URL: {final_url}")

@@ -310,8 +310,10 @@ class SliderSolver:
         captcha_visible = await page.evaluate("""() => {
             const selectors = [
                 '[class*="captcha"]',
-                '[class*="slider"]',
-                '[class*="verify"]',
+                '[class*="slider-puzzle"]',
+                '[class*="geetest"]',
+                '[class*="nc_wrapper"]',
+                '[class*="slider-track"]',
                 '[class*="puzzle"]'
             ];
             for (const sel of selectors) {
@@ -322,6 +324,11 @@ class SliderSolver:
                         return true;
                     }
                 }
+            }
+            // Check for canvas-based captcha
+            const canvases = document.querySelectorAll('canvas');
+            for (const c of canvases) {
+                if (c.offsetParent !== null && c.width > 100 && c.height > 50) return true;
             }
             return false;
         }""")
@@ -371,43 +378,64 @@ class ManualSolver:
 
         log_step(0, 0, "Manual CAPTCHA mode — please solve the slider in the browser")
 
-        # Make sure browser is visible (not headless)
-        # Wait for captcha to be solved
         start = asyncio.get_running_loop().time()
         while asyncio.get_running_loop().time() - start < self.timeout:
             await asyncio.sleep(2)
 
-            # Check if captcha is gone
-            captcha_visible = await page.evaluate("""() => {
-                const selectors = [
-                    '[class*="captcha"]',
-                    '[class*="slider"]',
-                    '[class*="verify"]',
-                    '[class*="puzzle"]'
-                ];
-                for (const sel of selectors) {
-                    const el = document.querySelector(sel);
-                    if (el && el.offsetParent !== null) {
-                        return true;
-                    }
-                }
-                return false;
-            }""")
-
-            if not captcha_visible:
-                log_ok("CAPTCHA solved manually!")
-                return True
-
-            # Check for page progression (OTP page appeared)
+            # Check for page progression (OTP/password page appeared = CAPTCHA solved)
             has_otp = await page.evaluate("""() => {
                 const inputs = document.querySelectorAll(
-                    'input[maxlength="1"], input[placeholder*="code"], input[placeholder*="OTP"]'
+                    'input[maxlength="1"], input[placeholder*="code"], input[placeholder*="OTP"], input[placeholder*="验证"]'
                 );
                 return inputs.length > 0;
             }""")
 
             if has_otp:
                 log_ok("CAPTCHA solved, OTP page detected!")
+                return True
+
+            # Check if captcha is still visible
+            # Use specific selectors — avoid generic [class*="verify"] which matches
+            # non-captcha elements like "verify your email" text
+            captcha_visible = await page.evaluate("""() => {
+                const selectors = [
+                    '[class*="captcha"]',
+                    '[class*="slider-puzzle"]',
+                    '[class*="geetest"]',
+                    '[class*="nc_wrapper"]',
+                    '[class*="slider-track"]',
+                    '[class*="puzzle"]'
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetParent !== null) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 50 && rect.height > 30) return true;
+                    }
+                }
+                // Check for canvas-based captcha
+                const canvases = document.querySelectorAll('canvas');
+                for (const c of canvases) {
+                    if (c.offsetParent !== null && c.width > 100 && c.height > 50) return true;
+                }
+                return false;
+            }""")
+
+            if not captcha_visible:
+                # Double-check that OTP fields aren't there either (maybe page is transitioning)
+                await asyncio.sleep(1)
+                has_otp_recheck = await page.evaluate("""() => {
+                    const inputs = document.querySelectorAll(
+                        'input[maxlength="1"], input[placeholder*="code"], input[placeholder*="OTP"], input[placeholder*="验证"]'
+                    );
+                    return inputs.length > 0;
+                }""")
+                if has_otp_recheck:
+                    log_ok("CAPTCHA solved, OTP page detected!")
+                    return True
+                # If neither captcha nor OTP fields visible, CAPTCHA might have been solved
+                # and page is in a transitional state — treat as solved
+                log_ok("CAPTCHA solved manually!")
                 return True
 
         log_err(f"Manual CAPTCHA solve timeout ({self.timeout}s)")

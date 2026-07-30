@@ -183,8 +183,7 @@ class GmailImapClient:
                             if payload:
                                 charset = part.get_content_charset() or "utf-8"
                                 html = payload.decode(charset, errors="replace")
-                                # Strip HTML tags
-                                body = re.sub(r"<[^>]+>", " ", html).strip()
+                                body = self._html_to_text(html)
                                 break
                         except Exception:
                             continue
@@ -198,6 +197,23 @@ class GmailImapClient:
                 pass
 
         return body
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        """Convert HTML to clean text, removing style/script blocks first."""
+        # Remove <style> and <script> blocks entirely (they contain CSS numbers that
+        # falsely match as OTP codes — e.g. "0.475569" → "475569")
+        text = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # Replace <br>, <div>, <p>, <tr>, <td> with newlines for readability
+        text = re.sub(r"<br\s*/?>|</?(?:div|p|tr|td|h[1-6]|li|table)[^>]*>", "\n", text, flags=re.IGNORECASE)
+        # Strip remaining HTML tags
+        text = re.sub(r"<[^>]+>", " ", text)
+        # Collapse whitespace but preserve newlines
+        text = re.sub(r"[^\S\n]+", " ", text)
+        # Remove leading/trailing whitespace per line
+        lines = [line.strip() for line in text.split("\n")]
+        return "\n".join(line for line in lines if line).strip()
 
     async def wait_for_otp(
         self,
@@ -215,9 +231,10 @@ class GmailImapClient:
             Body: VERIFICATION CODE\\n330605
 
         Strategy:
-            1. Look for "VERIFICATION CODE" followed by 6 digits (most precise)
-            2. Look for "验证码" followed by 6 digits
-            3. Fall back to any standalone 6-digit number
+            1. Filter: only process emails from PatewayAI sender or with OTP-related subject
+            2. Look for "VERIFICATION CODE" followed by 6 digits (most precise)
+            3. Look for "验证码" followed by 6 digits
+            4. Fall back to any standalone 6-digit number (only on confirmed OTP emails)
 
         Args:
             timeout: Max seconds to wait.
@@ -228,10 +245,18 @@ class GmailImapClient:
             OTP string if found, None if timeout.
         """
         start = time.time()
-        pattern = re.compile(otp_pattern)
-        # PatewayAI-specific pattern (highest priority)
-        # Matches "VERIFICATION CODE" followed by 6 digits (with any non-digit chars between)
-        pat_verify_code = re.compile(r"VERIFICATION\s*CODE\D*(\d{6})", re.IGNORECASE)
+        # PatewayAI-specific patterns
+        # After HTML-to-text conversion, "VERIFICATION CODE" and the OTP digits
+        # are on separate lines. Match "VERIFICATION CODE" followed by digits
+        # within a few lines (allowing newlines/spaces between).
+        pat_verify_code = re.compile(r"VERIFICATION\s*CODE\s*\n?\s*(\d{6})", re.IGNORECASE)
+        # Chinese: 验证码 (verification code) followed by 6 digits
+        pat_cn_code = re.compile(r"验证码\D{0,50}(\d{6})")
+        # Also match the CSS class pattern: otp-code">NNNNNN</div> (raw HTML fallback)
+        pat_otp_class = re.compile(r'otp-code[^>]*>\s*(\d{6})', re.IGNORECASE)
+        # Sender/subject filters — only process emails that look like PatewayAI OTP
+        pat_sender = re.compile(r"pateway", re.IGNORECASE)
+        pat_subject = re.compile(r"验证码|verification|verify|otp|code", re.IGNORECASE)
         check_count = 0
         seen_ids = set()
 
@@ -252,14 +277,25 @@ class GmailImapClient:
                     if msg_id in seen_ids:
                         continue
 
-                    subject = msg.get("subject", "")
-                    body = msg.get("body", "")
-                    from_addr = msg.get("from_address", "")
+                    subject = msg.get("subject", "") or ""
+                    body = msg.get("body", "") or ""
+                    from_addr = msg.get("from_address", "") or ""
 
                     log_debug(f"New email: from={from_addr[:40]}, subject={subject[:60]}")
 
-                    # Strategy 1: PatewayAI "VERIFICATION CODE" pattern (most precise)
-                    for text in [body, subject]:
+                    # ── Filter: only process emails that look like PatewayAI OTP ──
+                    # Accept if sender contains "pateway" OR subject contains OTP keywords
+                    is_otp_email = bool(
+                        pat_sender.search(from_addr) or pat_subject.search(subject)
+                    )
+                    if not is_otp_email:
+                        log_debug(f"Skipping non-OTP email: from={from_addr[:40]}, subject={subject[:60]}")
+                        seen_ids.add(msg_id)
+                        continue
+
+                    # ── Extraction (subject first, then body — consistent order) ──
+                    # Strategy 1: "VERIFICATION CODE" followed by 6 digits (newline-aware)
+                    for text in [subject, body]:
                         if not isinstance(text, str) or not text:
                             continue
                         match = pat_verify_code.search(text)
@@ -268,7 +304,30 @@ class GmailImapClient:
                             log_ok(f"OTP found via VERIFICATION CODE pattern after {elapsed}s: {match.group(1)}")
                             return match.group(1)
 
-                    # Strategy 2: Generic 6-digit fallback (subject first, then body)
+                    # Strategy 1b: HTML class "otp-code" (raw HTML may survive in non-multipart)
+                    for text in [subject, body]:
+                        if not isinstance(text, str) or not text:
+                            continue
+                        match = pat_otp_class.search(text)
+                        if match:
+                            elapsed = int(time.time() - start)
+                            log_ok(f"OTP found via otp-code class pattern after {elapsed}s: {match.group(1)}")
+                            return match.group(1)
+
+                    # Strategy 2: Chinese 验证码 followed by 6 digits
+                    for text in [subject, body]:
+                        if not isinstance(text, str) or not text:
+                            continue
+                        match = pat_cn_code.search(text)
+                        if match:
+                            elapsed = int(time.time() - start)
+                            log_ok(f"OTP found via 验证码 pattern after {elapsed}s: {match.group(1)}")
+                            return match.group(1)
+
+                    # Strategy 3: Generic 6-digit fallback (only on confirmed OTP emails)
+                    # After HTML cleaning, the FIRST 6-digit number should be the OTP
+                    # (CSS numbers are stripped, so this is safe now)
+                    pattern = re.compile(r"\b(\d{6})\b")
                     for text in [subject, body]:
                         if not isinstance(text, str) or not text:
                             continue

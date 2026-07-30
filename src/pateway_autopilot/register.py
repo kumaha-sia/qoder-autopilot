@@ -299,54 +299,62 @@ async def register_and_verify(
 
         # Wait for response
         await human_think("careful")
-        await asyncio.sleep(random.uniform(2, 3))
 
-        # Check for error messages after clicking "Send code"
-        # Use JS to find error text within the modal/form context only
-        try:
-            error_text = await page.evaluate("""() => {
-                const modal = document.querySelector('[class*="modal"], [class*="dialog"], form');
-                const root = modal || document.body;
-                const errorSelectors = [
-                    '.toast-error', '.alert-error', '.el-message--error',
-                    '[class*="error-msg"]', '[class*="errorMsg"]', '[class*="error-text"]',
-                ];
-                for (const sel of errorSelectors) {
-                    const el = root.querySelector(sel);
-                    if (el && el.offsetParent !== null && el.textContent.trim()) {
-                        return el.textContent.trim();
-                    }
-                }
-                return null;
-            }""")
-            if error_text:
-                log_err(f"Send code failed: {error_text}")
-                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png"))
-                return None
-        except Exception:
-            pass
-
-        # Check if CAPTCHA appeared (means email was accepted)
-        # Use specific CAPTCHA selectors to avoid false positives from canvas/verify elements
+        # Poll for CAPTCHA appearance (up to 15s) — don't give up after one check
         captcha_visible = False
-        try:
-            captcha_visible = await page.evaluate("""() => {
-                const captchaSelectors = [
-                    '[class*="captcha"]', '[id*="captcha"]',
-                    '[class*="slider-puzzle"]', '[class*="geetest"]',
-                    '[class*="nc_wrapper"]', '[class*="verify-wrap"]',
-                ];
-                for (const sel of captchaSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el && el.offsetParent !== null) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 50 && rect.height > 30) return true;
+        captcha_poll_start = asyncio.get_running_loop().time()
+        captcha_poll_timeout = 15
+
+        while asyncio.get_running_loop().time() - captcha_poll_start < captcha_poll_timeout:
+            await asyncio.sleep(1)
+
+            # Check for error messages after clicking "Send code"
+            try:
+                error_text = await page.evaluate("""() => {
+                    const modal = document.querySelector('[class*="modal"], [class*="dialog"], form');
+                    const root = modal || document.body;
+                    const errorSelectors = [
+                        '.toast-error', '.alert-error', '.el-message--error',
+                        '[class*="error-msg"]', '[class*="errorMsg"]', '[class*="error-text"]',
+                    ];
+                    for (const sel of errorSelectors) {
+                        const el = root.querySelector(sel);
+                        if (el && el.offsetParent !== null && el.textContent.trim()) {
+                            return el.textContent.trim();
+                        }
                     }
-                }
-                return false;
-            }""")
-        except Exception:
-            pass
+                    return null;
+                }""")
+                if error_text:
+                    log_err(f"Send code failed: {error_text}")
+                    await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png"))
+                    return None
+            except Exception:
+                pass
+
+            # Check if CAPTCHA appeared (means email was accepted)
+            # Use specific CAPTCHA selectors to avoid false positives
+            try:
+                captcha_visible = await page.evaluate("""() => {
+                    const captchaSelectors = [
+                        '[class*="captcha"]', '[id*="captcha"]',
+                        '[class*="slider-puzzle"]', '[class*="geetest"]',
+                        '[class*="nc_wrapper"]', '[class*="verify-wrap"]',
+                        '[class*="slider-track"]', 'canvas',
+                    ];
+                    for (const sel of captchaSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el && el.offsetParent !== null) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 50 && rect.height > 30) return true;
+                        }
+                    }
+                    return false;
+                }""")
+                if captcha_visible:
+                    break
+            except Exception:
+                pass
 
         if not captcha_visible:
             page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
