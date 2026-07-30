@@ -47,6 +47,7 @@ class GmailImapClient:
         self.app_password = app_password.replace(" ", "")
         self._conn: Optional[imaplib.IMAP4_SSL] = None
         self.address = email_address  # Compatible with TempMailClient interface
+        self._baseline_ids: set = set()  # IDs of emails before we start waiting
 
     def _connect(self) -> imaplib.IMAP4_SSL:
         """Connect and login to Gmail IMAP."""
@@ -66,13 +67,17 @@ class GmailImapClient:
 
     async def create(self) -> str:
         """Compatible with TempMailClient interface.
-        
-        Returns the email address (alias should be generated before calling this).
+
+        Connects to Gmail and records baseline message IDs so we only
+        pick up NEW emails that arrive after this point.
         """
-        # Test connection
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._connect)
-        log_ok(f"Gmail IMAP: connected to {self.email_address}")
+
+        # Record baseline: all existing message IDs so we skip old emails
+        baseline_msgs = await self.get_messages()
+        self._baseline_ids = {m.get("id", "") for m in baseline_msgs}
+        log_ok(f"Gmail IMAP: connected to {self.email_address} ({len(self._baseline_ids)} existing emails)")
         return self.email_address
 
     async def get_messages(self) -> list[dict]:
@@ -203,6 +208,9 @@ class GmailImapClient:
     ) -> Optional[str]:
         """Poll Gmail inbox until OTP email arrives.
 
+        Only checks emails that arrived AFTER create() was called
+        (using baseline message IDs).
+
         Args:
             timeout: Max seconds to wait.
             poll_interval: Seconds between polls.
@@ -216,7 +224,7 @@ class GmailImapClient:
         check_count = 0
         seen_ids = set()
 
-        log(f"   📧 Monitoring Gmail inbox for OTP...")
+        log(f"   📧 Monitoring Gmail for new OTP email (ignoring {len(self._baseline_ids)} old emails)...")
 
         while time.time() - start < timeout:
             check_count += 1
@@ -224,6 +232,12 @@ class GmailImapClient:
                 messages = await self.get_messages()
                 for msg in messages:
                     msg_id = msg.get("id", "")
+
+                    # Skip emails that existed before we started waiting
+                    if msg_id in self._baseline_ids:
+                        continue
+
+                    # Skip emails we already checked
                     if msg_id in seen_ids:
                         continue
 
@@ -231,15 +245,7 @@ class GmailImapClient:
                     body = msg.get("body", "")
                     from_addr = msg.get("from_address", "")
 
-                    # Check if this is from PatewayAI or contains verification code
-                    is_otp_email = (
-                        "pateway" in from_addr.lower() or
-                        "pateway" in subject.lower() or
-                        "verif" in subject.lower() or
-                        "code" in subject.lower() or
-                        "验证" in subject or
-                        " código" in subject.lower()
-                    )
+                    log_debug(f"New email: from={from_addr[:40]}, subject={subject[:60]}")
 
                     # Search for OTP in subject first, then body
                     for text in [subject, body]:
@@ -256,7 +262,8 @@ class GmailImapClient:
 
                 if check_count % 5 == 0:
                     elapsed = int(time.time() - start)
-                    log_debug(f"OTP check #{check_count} ({elapsed}s): {len(messages)} messages checked")
+                    new_count = len(messages) - len(self._baseline_ids)
+                    log_debug(f"OTP check #{check_count} ({elapsed}s): {new_count} new emails, no OTP yet")
 
             except Exception as e:
                 log_debug(f"Gmail OTP poll error: {e}")

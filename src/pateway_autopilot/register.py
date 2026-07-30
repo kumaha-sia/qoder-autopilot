@@ -514,24 +514,22 @@ async def register_and_verify(
         await human_think("careful")
         await asyncio.sleep(random.uniform(2, 4))
 
-        # Don't screenshot after signup — page may show session tokens
-
         # ═══ STEP 6: Verify account creation ═══
         log_step(7, 7, "Verifying account creation...")
 
-        # Wait for automatic redirect to /#/console/keys
+        # Wait for PatewayAI to auto-redirect (no manual navigation!)
         await human_think("reading")
-        await asyncio.sleep(random.uniform(2, 4))
+        await asyncio.sleep(random.uniform(3, 5))
 
         current_url = page.url
         log(f"   Current URL: {current_url}")
 
+        # Check for "Account created" modal — click "Get started" if present
         page_text = await page.evaluate(
             "() => document.body?.innerText?.substring(0, 1000) || ''"
         )
         page_text_lower = page_text.lower()
 
-        # Check for "Account created" modal with "Get started" button
         has_created_modal = "account created" in page_text_lower or "注册成功" in page_text_lower
         if has_created_modal:
             log_ok("Account created modal detected!")
@@ -539,25 +537,14 @@ async def register_and_verify(
                 get_started_btn = page.locator('button:has-text("Get started"), button:has-text("开始")').first
                 await human_click(page, get_started_btn, timeout=5000)
                 await human_think("normal")
-                await asyncio.sleep(random.uniform(2, 3))
+                await asyncio.sleep(random.uniform(3, 5))
                 current_url = page.url
+                log(f"   After Get started — URL: {current_url}")
             except Exception:
                 log_debug("No 'Get started' button found")
 
-        # Verify we landed on the console/keys page
-        is_on_console = "/console" in current_url or "/#/console" in current_url
-        if is_on_console:
-            log_ok(f"Account created! On console page: {current_url}")
-        else:
-            log_warn(f"Expected console redirect but got: {current_url}")
-            # Navigate directly to the keys page
-            try:
-                await page.goto(f"{config.PATEWAY_URL}/#/console/keys", wait_until="networkidle", timeout=15000)
-                await human_think("normal")
-                current_url = page.url
-                log_ok(f"Navigated to: {current_url}")
-            except Exception:
-                log_err("Failed to navigate to console/keys page")
+        # Just wait — PatewayAI handles the redirect automatically
+        log_ok(f"Account created! Current page: {current_url}")
 
         await human_think("normal")
 
@@ -605,20 +592,13 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
         log("   Preparing to create API key...")
         await human_think("normal")
 
-        current_url = page.url
-
-        # Verify we're on the console/keys page
-        is_console = "/console" in current_url or "/#/console" in current_url
-        if not is_console:
-            log_warn(f"Not on console page ({current_url}), navigating to keys page...")
-            try:
-                await page.goto(f"{config.PATEWAY_URL}/#/console/keys", wait_until="networkidle", timeout=15000)
-                await human_think("reading")
-                current_url = page.url
-                log_ok(f"Navigated to: {current_url}")
-            except Exception:
-                log_err("Failed to navigate to console/keys page")
-                return None
+        # Wait for console page to fully load (SPA rendering)
+        log("   Waiting for console page to load...")
+        try:
+            await page.wait_for_selector('button, table, [class*="key"], [class*="api"]', timeout=15000)
+        except Exception:
+            log_warn("Console page elements not detected, continuing anyway...")
+        await asyncio.sleep(2)
 
         await human_think("reading")
 
@@ -636,11 +616,10 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
         selectors = [
             'button:has-text("Create Key")',
             'button:has-text("创建")',
-            'button:has-text("New")',
-            'button:has-text("Add")',
+            'button:has-text("New Key")',
+            'button:has-text("Add Key")',
             'button:has-text("Generate")',
             'button[class*="create"]',
-            'button[class*="add"]',
             'a:has-text("Create Key")',
         ]
 
@@ -663,16 +642,8 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
                 const buttons = document.querySelectorAll('button, a');
                 for (const btn of buttons) {
                     const text = btn.textContent.toLowerCase();
-                    if (text.includes('create') || text.includes('add') || text.includes('new')) {
-                        if (text.includes('key')) {
-                            btn.click();
-                            return true;
-                        }
-                    }
-                }
-                const allBtns = document.querySelectorAll('button');
-                for (const btn of allBtns) {
-                    if (btn.textContent.includes('Create') || btn.textContent.includes('New')) {
+                    if ((text.includes('create') || text.includes('add') || text.includes('new')) &&
+                        (text.includes('key') || text.includes('创建'))) {
                         btn.click();
                         return true;
                     }
@@ -681,27 +652,49 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             }""")
             await human_think("normal")
 
-        # Fill key name
+        # Wait for Create Key modal to appear, then fill key name
         key_name = config.KEY_NAME
         log(f"   Setting key name: {key_name}")
-        key_name_input = page.locator(
-            'input[placeholder*="name"], input[placeholder*="Name"]'
-        ).first
+        try:
+            # Wait for modal/input to appear after clicking Create Key
+            key_name_input = page.locator(
+                'input[placeholder*="name"], input[placeholder*="Name"], input[id*="name"], input[id*="keyName"]'
+            ).first
+            await key_name_input.wait_for(state="visible", timeout=10000)
 
-        await human_click(page, key_name_input)
-        await human_type(page, key_name, min_delay=60, max_delay=150)
-        await human_think("normal")
+            await human_click(page, key_name_input)
+            await human_type(page, key_name, min_delay=60, max_delay=150)
+            await human_think("normal")
+        except Exception as e:
+            log_warn(f"Key name input not found: {e}")
+            log_debug("Trying alternative selectors...")
+            # Try any visible input in a modal/dialog
+            try:
+                inputs = page.locator('input:visible')
+                count = await inputs.count()
+                if count > 0:
+                    await human_click(page, inputs.first)
+                    await human_type(page, key_name, min_delay=60, max_delay=150)
+            except Exception:
+                log_err("Could not find any input for key name")
+                return None
 
         log("   Using default Service Mode (Economy)")
 
-        # Click "Create"
+        # Click "Create" — wait for it to be visible first
         log("   Clicking 'Create'...")
-        create_btn = page.locator('button:has-text("Create")').last
-        await human_click(page, create_btn, timeout=5000)
+        try:
+            create_btn = page.locator('button:has-text("Create"):not(:has-text("Create Key"))').last
+            await create_btn.wait_for(state="visible", timeout=5000)
+            await human_click(page, create_btn, timeout=10000)
+        except Exception:
+            # Fallback: try any button with "Create" text
+            create_btn = page.locator('button:has-text("Create")').last
+            await human_click(page, create_btn, timeout=10000)
 
         # Wait for response
         await human_think("careful")
-        await asyncio.sleep(random.uniform(2, 4))
+        await asyncio.sleep(random.uniform(3, 5))
 
         if not captured_key:
             log("   Trying UI extraction...")
