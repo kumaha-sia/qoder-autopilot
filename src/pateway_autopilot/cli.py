@@ -82,7 +82,7 @@ async def run_one(
         # If Gmail with app password → use IMAP for auto OTP
         if "gmail.com" in effective_email.lower() or "googlemail.com" in effective_email.lower():
             from .infra.email_gen import GmailAliasGenerator
-            gen = GmailAliasGenerator(effective_email, method="dot")
+            gen = GmailAliasGenerator(effective_email, method="combined", prefix="reg")
             email = gen.get(acct_num) if acct_num > 0 else gen.next()
             log_ok(f"Gmail alias: {email}")
 

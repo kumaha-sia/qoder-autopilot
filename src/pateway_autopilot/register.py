@@ -247,7 +247,20 @@ async def register_and_verify(
         await random_mouse_movement(page)
         await human_think("normal")
 
-        await human_click(page, get_started, timeout=10000)
+        try:
+            await human_click(page, get_started, timeout=10000)
+        except Exception:
+            log_debug("Get Started click failed, trying JS click")
+            await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button, a');
+                for (const btn of buttons) {
+                    if (btn.textContent.trim().toLowerCase().includes('get started')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""")
 
         # Wait for modal with human-like patience
         await human_think("careful")
@@ -259,22 +272,35 @@ async def register_and_verify(
         page_title = await page.title()
         log_debug(f"After Get Started — URL: {current_url}, Title: {page_title}")
 
+        # Check if email input is visible — if not, try direct signup navigation
         try:
-            await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=10000)
+            await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=5000)
         except Exception:
-            log_warn("Email input not found after Get Started — trying direct navigation to signup")
-            # Try direct navigation to signup/register page
-            try:
-                await page.goto(f"{config.PATEWAY_URL}/#/signup", wait_until="networkidle", timeout=15000)
-                await human_think("reading")
-                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"after_signup_nav{suffix}.png"))
-            except Exception:
-                pass
-            try:
-                await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=10000)
-            except Exception:
-                log_err("Still cannot find email input — page structure may have changed")
-                return None
+            log_debug("Email input not found after Get Started — checking for auth modal")
+            # Check if auth modal is already visible (sometimes modal opens but email input
+            # has a different selector)
+            has_auth_modal = await page.evaluate("""() => {
+                const modal = document.querySelector('[class*="auth-modal"], [class*="modal"]');
+                if (modal && modal.offsetParent !== null) return true;
+                const emailInput = document.querySelector('input[type="email"]');
+                if (emailInput && emailInput.offsetParent !== null) return true;
+                return false;
+            }""")
+            if has_auth_modal:
+                log_debug("Auth modal found with different selector")
+            else:
+                log_warn("Email input not found — trying direct navigation to signup")
+                try:
+                    await page.goto(f"{config.PATEWAY_URL}/#/signup", wait_until="networkidle", timeout=15000)
+                    await human_think("reading")
+                    await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"after_signup_nav{suffix}.png"))
+                except Exception:
+                    pass
+                try:
+                    await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=10000)
+                except Exception:
+                    log_err("Still cannot find email input — page structure may have changed")
+                    return None
 
         # Simulate reading the modal
         await human_think("reading")
@@ -283,25 +309,65 @@ async def register_and_verify(
         log_step(3, 7, f"Entering email: {email}")
         email_input = page.locator('input[type="email"], input[placeholder*="example"]').first
 
-        # Click on input field
-        await human_click(page, email_input)
-        await human_think("quick")
-
-        # Type email like a human
-        await human_type(page, email, min_delay=50, max_delay=150)
+        # Fill email directly (more reliable than human_click + human_type for Ant Design)
+        try:
+            await email_input.fill(email)
+        except Exception:
+            await human_click(page, email_input)
+            await human_type(page, email, min_delay=50, max_delay=150)
 
         # Pause after typing (like reviewing)
         await human_think("reading")
 
-        # Click "Send code"
-        send_code_btn = page.locator('button:has-text("Send code"), button:has-text("发送")').first
-        await human_click(page, send_code_btn, timeout=5000)
+        # Click "Send code" — try multiple methods
+        log("   Clicking 'Send code'...")
+        send_code_clicked = False
+        send_code_selectors = [
+            'button:has-text("Send code")',
+            'button:has-text("发送")',
+            'button:has-text("Send Code")',
+            '.auth-modal button[type="submit"]',
+            '.auth-modal .ant-btn-primary',
+        ]
+        for sel in send_code_selectors:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=2000):
+                    await btn.click(force=True)
+                    send_code_clicked = True
+                    log_debug(f"Send code clicked via: {sel}")
+                    break
+            except Exception:
+                continue
+
+        if not send_code_clicked:
+            log_debug("Send code button not found via selectors, trying JS click")
+            await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    const t = btn.textContent.toLowerCase().trim();
+                    if (t.includes('send code') || t.includes('发送')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                // Try primary button in auth modal
+                const modal = document.querySelector('[class*="auth-modal"]');
+                if (modal) {
+                    const btn = modal.querySelector('button[type="submit"], .ant-btn-primary');
+                    if (btn) btn.click();
+                }
+                return false;
+            }""")
 
         # Wait for response
         await human_think("careful")
 
-        # Poll for CAPTCHA appearance (up to 15s) — don't give up after one check
+        # Poll for either CAPTCHA or direct OTP/password modal (up to 15s)
+        # PatewayAI may show CAPTCHA puzzle before sending OTP, OR may skip
+        # CAPTCHA entirely and go straight to the registration modal.
         captcha_visible = False
+        otp_modal_visible = False
         captcha_poll_start = asyncio.get_running_loop().time()
         captcha_poll_timeout = 15
 
@@ -332,8 +398,7 @@ async def register_and_verify(
             except Exception:
                 pass
 
-            # Check if CAPTCHA appeared (means email was accepted)
-            # Use specific CAPTCHA selectors to avoid false positives
+            # Check if CAPTCHA appeared (means email was accepted, need to solve first)
             try:
                 captcha_visible = await page.evaluate("""() => {
                     const captchaSelectors = [
@@ -352,37 +417,64 @@ async def register_and_verify(
                     return false;
                 }""")
                 if captcha_visible:
+                    log("   CAPTCHA detected — solving required before OTP is sent")
                     break
             except Exception:
                 pass
 
-        if not captcha_visible:
+            # Check if registration modal appeared directly (no CAPTCHA needed)
+            # PatewayAI sometimes skips CAPTCHA and goes straight to OTP/password fields
+            try:
+                otp_modal_visible = await page.evaluate("""() => {
+                    // Look for OTP input or password fields in a modal/form
+                    const modal = document.querySelector(
+                        '[class*="auth-modal"], [class*="modal"], [class*="dialog"], form'
+                    );
+                    if (!modal || modal.offsetParent === null) return false;
+                    // Check for OTP, password, or verification code inputs
+                    const otpInputs = modal.querySelectorAll(
+                        'input[placeholder*="code"], input[placeholder*="OTP"], ' +
+                        'input[placeholder*="验证"], input[maxlength="1"], ' +
+                        'input[type="password"]'
+                    );
+                    return otpInputs.length > 0;
+                }""")
+                if otp_modal_visible:
+                    log_ok("Registration modal detected directly (no CAPTCHA needed)")
+                    break
+            except Exception:
+                pass
+
+        if not captcha_visible and not otp_modal_visible:
             page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
-            log_err("No CAPTCHA appeared after Send code. Email may be rejected.")
+            log_err("No CAPTCHA or registration modal appeared after Send code.")
             log_debug(f"Page text: {page_text[:300]}")
             await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"no_captcha{suffix}.png"))
             return None
 
-        # ═══ STEP 4: Solve slider CAPTCHA ═══
-        log_step(4, 7, "Solving slider CAPTCHA...")
-        await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"before_captcha{suffix}.png"))
+        # ═══ STEP 4: Solve slider CAPTCHA (only if CAPTCHA appeared) ═══
+        if captcha_visible:
+            log_step(4, 7, "Solving slider CAPTCHA...")
+            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"before_captcha{suffix}.png"))
 
-        if manual_captcha:
-            captcha_ok = await manual_solver.solve(page)
-        else:
-            captcha_ok = await slider_solver.solve(page)
-            if not captcha_ok:
-                log_warn("Auto solve failed, falling back to manual...")
+            if manual_captcha:
                 captcha_ok = await manual_solver.solve(page)
+            else:
+                captcha_ok = await slider_solver.solve(page)
+                if not captcha_ok:
+                    log_warn("Auto solve failed, falling back to manual...")
+                    captcha_ok = await manual_solver.solve(page)
 
-        if not captcha_ok:
-            log_err("CAPTCHA solve failed!")
-            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"captcha_fail{suffix}.png"))
-            return None
+            if not captcha_ok:
+                log_err("CAPTCHA solve failed!")
+                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"captcha_fail{suffix}.png"))
+                return None
 
-        # Wait after captcha solve (email being sent)
-        await human_think("reading")
-        await asyncio.sleep(random.uniform(2, 4))
+            # Wait after captcha solve (email being sent)
+            await human_think("reading")
+            await asyncio.sleep(random.uniform(2, 4))
+        else:
+            log_step(4, 7, "No CAPTCHA needed — proceeding to OTP")
         # Don't screenshot here — OTP/password fields may be visible
 
         # ═══ STEP 5: Enter OTP and password ═══
@@ -426,8 +518,7 @@ async def register_and_verify(
         otp_input = page.locator('input[placeholder*="code"], input[placeholder*="OTP"], input[placeholder*="验证"]').first
         try:
             await otp_input.wait_for(state="visible", timeout=5000)
-            await human_click(page, otp_input)
-            await human_type(page, otp, min_delay=80, max_delay=200)
+            await otp_input.fill(otp)
             log_ok("OTP entered!")
         except Exception:
             # Fallback: try per-digit inputs
@@ -448,20 +539,18 @@ async def register_and_verify(
         # Pause before password
         await human_think("normal")
 
-        # Fill password
+        # Fill password — use fill() directly to avoid human_click timeout issues
+        # with Ant Design inputs (they have wrapper elements that intercept mouse events)
         pw_inputs = page.locator('input[type="password"]')
         pw_count = await pw_inputs.count()
 
         if pw_count >= 2:
-            await human_click(page, pw_inputs.nth(0))
-            await human_type(page, identity["password"], min_delay=50, max_delay=120)
+            await pw_inputs.nth(0).fill(identity["password"])
             await human_think("quick")
-            await human_click(page, pw_inputs.nth(1))
-            await human_type(page, identity["password"], min_delay=50, max_delay=120)
+            await pw_inputs.nth(1).fill(identity["password"])
             log_ok("Password filled!")
         elif pw_count == 1:
-            await human_click(page, pw_inputs.nth(0))
-            await human_type(page, identity["password"], min_delay=50, max_delay=120)
+            await pw_inputs.nth(0).fill(identity["password"])
             log_ok("Password filled!")
 
         # Fill invite code if provided
@@ -470,51 +559,107 @@ async def register_and_verify(
                 invite_input = page.locator(
                     'input[placeholder*="invitation"], input[placeholder*="invite"], input[id*="inviteCode"]'
                 ).first
-                await human_click(page, invite_input)
-                await human_type(page, invite_code, min_delay=60, max_delay=150)
+                await invite_input.fill(invite_code)
                 log(f"   Invite code filled: {invite_code}")
             except Exception:
                 log_debug("No invite code field found")
 
-        # Check ToS checkbox with human-like behavior
+        # Check ToS checkbox — Ant Design uses React state, so we must trigger
+        # the React onChange handler. Simple .click() on the wrapper is the most
+        # reliable way. Force-click the visible wrapper, then verify checkbox state.
         await human_think("normal")
-        try:
-            # Find and click checkbox
-            checkbox = page.locator('input[type="checkbox"]').first
-            await human_click(page, checkbox)
-        except Exception:
-            # Fallback to JS
-            await page.evaluate("""() => {
-                const cb = document.querySelector('input[type="checkbox"]');
-                if (cb && !cb.checked) cb.click();
-            }""")
+        checkbox_checked = False
+        for attempt in range(3):
+            try:
+                # Method 1: Click the Ant Design checkbox wrapper
+                checkbox_wrapper = page.locator('.ant-checkbox-wrapper, label:has(input[type="checkbox"])').first
+                if await checkbox_wrapper.is_visible(timeout=2000):
+                    await checkbox_wrapper.click(force=True)
+                    await asyncio.sleep(0.5)
+                    # Verify checkbox is now checked
+                    is_checked = await page.evaluate(
+                        "() => document.querySelector('input[type=\"checkbox\"]')?.checked || false"
+                    )
+                    if is_checked:
+                        checkbox_checked = True
+                        break
+            except Exception:
+                pass
+
+            # Method 2: JS click the native input
+            try:
+                await page.evaluate("""() => {
+                    const cb = document.querySelector('input[type="checkbox"]');
+                    if (cb) cb.click();
+                }""")
+                await asyncio.sleep(0.5)
+                is_checked = await page.evaluate(
+                    "() => document.querySelector('input[type=\"checkbox\"]')?.checked || false"
+                )
+                if is_checked:
+                    checkbox_checked = True
+                    break
+            except Exception:
+                pass
+
+        if not checkbox_checked:
+            log_warn("Could not verify ToS checkbox is checked — form may not submit")
 
         # Scroll down naturally
         await human_scroll(page, "down", random.randint(100, 300))
         await human_think("normal")
 
-        # Click "Sign up"
+        # Click "Sign up" — use JS click to avoid pointer interception.
+        # Also wait for the button to be enabled (not disabled by form validation).
         log("   Clicking Sign up button...")
-        signup_btn = page.locator(
-            'button:has-text("Sign up"), button:has-text("注册"), button.btn--dark'
-        ).first
+        signup_clicked = False
+        for attempt in range(3):
+            # Check if signup button is enabled
+            btn_enabled = await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    const t = btn.textContent.toLowerCase().trim();
+                    if ((t.includes('sign up') || t.includes('注册')) && !btn.disabled) {
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            if not btn_enabled:
+                log_debug(f"Sign up button disabled (attempt {attempt+1}/3), waiting...")
+                await asyncio.sleep(2)
+                continue
 
-        try:
-            await human_click(page, signup_btn, timeout=10000)
-        except Exception:
-            log_debug("Direct click failed, using JS fallback")
+            # Click via JS
             await page.evaluate("""() => {
                 const buttons = document.querySelectorAll('button');
                 for (const btn of buttons) {
-                    if (btn.textContent.toLowerCase().includes('sign up')) {
+                    const t = btn.textContent.toLowerCase().trim();
+                    if ((t.includes('sign up') || t.includes('注册')) && !btn.disabled) {
                         btn.click();
                         return true;
                     }
                 }
                 const darkBtns = document.querySelectorAll('.btn--dark');
                 for (const btn of darkBtns) {
-                    const t = btn.textContent.toLowerCase();
-                    if (t.includes('sign') || t.includes('注册') || t.includes('submit') || t.includes('confirm')) {
+                    const t = btn.textContent.toLowerCase().trim();
+                    if ((t.includes('sign') || t.includes('注册') || t.includes('submit') || t.includes('confirm')) && !btn.disabled) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            signup_clicked = True
+            break
+
+        if not signup_clicked:
+            log_warn("Sign up button still disabled after 3 attempts — trying JS click anyway")
+            await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    const t = btn.textContent.toLowerCase().trim();
+                    if (t.includes('sign up') || t.includes('注册')) {
                         btn.click();
                         return true;
                     }
@@ -527,38 +672,63 @@ async def register_and_verify(
         await asyncio.sleep(random.uniform(2, 4))
 
         # ═══ STEP 6: Verify account creation ═══
-        log_step(7, 7, "Verifying account creation...")
+        log_step(6, 7, "Verifying account creation...")
 
-        # Wait for PatewayAI to auto-redirect (no manual navigation!)
-        await human_think("reading")
-        await asyncio.sleep(random.uniform(3, 5))
+        # Wait for PatewayAI to process signup and show success modal or redirect
+        # Poll for up to 30s for either a success modal or URL change
+        signup_success = False
+        poll_start = asyncio.get_running_loop().time()
+        poll_timeout = 30
 
-        current_url = page.url
-        log(f"   Current URL: {current_url}")
+        while asyncio.get_running_loop().time() - poll_start < poll_timeout:
+            await asyncio.sleep(2)
 
-        # Check for "Account created" modal — click "Get started" if present
-        page_text = await page.evaluate(
-            "() => document.body?.innerText?.substring(0, 1000) || ''"
-        )
-        page_text_lower = page_text.lower()
+            current_url = page.url
+            page_text = await page.evaluate(
+                "() => document.body?.innerText?.substring(0, 1000) || ''"
+            )
+            page_text_lower = page_text.lower()
 
-        has_created_modal = "account created" in page_text_lower or "注册成功" in page_text_lower
-        if has_created_modal:
-            log_ok("Account created modal detected!")
-            try:
-                get_started_btn = page.locator('button:has-text("Get started"), button:has-text("开始")').first
-                await human_click(page, get_started_btn, timeout=5000)
-                log("   Waiting for redirect to Console...")
-                # Wait for PatewayAI to redirect to Console page
+            # Check for success indicators
+            has_created_modal = "account created" in page_text_lower or "注册成功" in page_text_lower
+            has_error = "failed" in page_text_lower and "sign up" in page_text_lower
+
+            if has_created_modal:
+                log_ok("Account created modal detected!")
                 try:
-                    await page.wait_for_url("**/console**", timeout=15000)
-                    log_ok(f"Redirected to Console: {page.url}")
+                    # Click "Get started" via JS to avoid pointer interception
+                    await page.evaluate("""() => {
+                        const buttons = document.querySelectorAll('button, a');
+                        for (const btn of buttons) {
+                            const t = btn.textContent.toLowerCase().trim();
+                            if (t.includes('get started') || t.includes('开始')) {
+                                btn.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }""")
+                    log("   Waiting for redirect to Console...")
                 except Exception:
-                    log_debug("Redirect timeout, checking current URL...")
-                    await asyncio.sleep(3)
-                    log(f"   Current URL: {page.url}")
-            except Exception:
-                log_debug("No 'Get started' button found")
+                    log_debug("No 'Get started' button found")
+                signup_success = True
+                break
+
+            if has_error:
+                log_err("Signup failed — error detected on page")
+                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"signup_error{suffix}.png"))
+                return None
+
+            # Check if already redirected to console
+            if "/console" in current_url or "/#/console" in current_url:
+                log_ok(f"Already on Console: {current_url}")
+                signup_success = True
+                break
+
+        if not signup_success:
+            current_url = page.url
+            log_warn(f"No success modal detected after {poll_timeout}s — URL: {current_url}")
+            log_debug(f"Page text: {page_text[:300]}")
 
         log_ok(f"Account created! Current page: {page.url}")
 
