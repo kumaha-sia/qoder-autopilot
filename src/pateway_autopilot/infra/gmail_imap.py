@@ -211,16 +211,28 @@ class GmailImapClient:
         Only checks emails that arrived AFTER create() was called
         (using baseline message IDs).
 
+        PatewayAI email format:
+            Subject: 【验证码】欢迎注册
+            Body: VERIFICATION CODE\\n330605
+
+        Strategy:
+            1. Look for "VERIFICATION CODE" followed by 6 digits (most precise)
+            2. Look for "验证码" followed by 6 digits
+            3. Fall back to any standalone 6-digit number
+
         Args:
             timeout: Max seconds to wait.
             poll_interval: Seconds between polls.
-            otp_pattern: Regex pattern to match OTP.
+            otp_pattern: Regex pattern to match OTP (fallback).
 
         Returns:
             OTP string if found, None if timeout.
         """
         start = time.time()
         pattern = re.compile(otp_pattern)
+        # PatewayAI-specific pattern (highest priority)
+        # Matches "VERIFICATION CODE" followed by 6 digits (with any non-digit chars between)
+        pat_verify_code = re.compile(r"VERIFICATION\s*CODE\D*(\d{6})", re.IGNORECASE)
         check_count = 0
         seen_ids = set()
 
@@ -247,15 +259,24 @@ class GmailImapClient:
 
                     log_debug(f"New email: from={from_addr[:40]}, subject={subject[:60]}")
 
-                    # Search for OTP in subject first, then body
+                    # Strategy 1: PatewayAI "VERIFICATION CODE" pattern (most precise)
+                    for text in [body, subject]:
+                        if not isinstance(text, str) or not text:
+                            continue
+                        match = pat_verify_code.search(text)
+                        if match:
+                            elapsed = int(time.time() - start)
+                            log_ok(f"OTP found via VERIFICATION CODE pattern after {elapsed}s: {match.group(1)}")
+                            return match.group(1)
+
+                    # Strategy 2: Generic 6-digit fallback (subject first, then body)
                     for text in [subject, body]:
                         if not isinstance(text, str) or not text:
                             continue
                         match = pattern.search(text)
                         if match:
                             elapsed = int(time.time() - start)
-                            log_ok(f"OTP found after {elapsed}s ({check_count} checks): {match.group(1)}")
-                            log_debug(f"  From: {from_addr}, Subject: {subject[:60]}")
+                            log_ok(f"OTP found (fallback) after {elapsed}s: {match.group(1)}")
                             return match.group(1)
 
                     seen_ids.add(msg_id)
