@@ -90,44 +90,43 @@ class GmailImapClient:
         return await loop.run_in_executor(None, self._fetch_recent_messages)
 
     def _fetch_recent_messages(self) -> list[dict]:
-        """Fetch recent unread messages from Gmail."""
+        """Fetch recent messages from Gmail using UID (persistent IDs)."""
         try:
             conn = self._connect()
             conn.select("INBOX")
 
-            # Search for recent emails (last 5 minutes)
-            # IMAP date format: DD-Mon-YYYY
             import datetime
             today = datetime.datetime.now().strftime("%d-%b-%Y")
 
-            # Search for today's emails
-            status, data = conn.search(None, f'(SINCE {today})')
+            # Use UID search for persistent message IDs
+            status, data = conn.uid('search', None, f'(SINCE {today})')
             if status != "OK":
                 return []
 
-            mail_ids = data[0].split()
-            # Get last 10 emails max
-            mail_ids = mail_ids[-10:] if len(mail_ids) > 10 else mail_ids
+            uid_list = data[0].split()
+            # Get last 10 UIDs max
+            uid_list = uid_list[-10:] if len(uid_list) > 10 else uid_list
 
             messages = []
-            for mail_id in reversed(mail_ids):  # Newest first
+            for uid in reversed(uid_list):  # Newest first
                 try:
-                    status, msg_data = conn.fetch(mail_id, "(RFC822)")
+                    status, msg_data = conn.uid('fetch', uid, "(RFC822)")
                     if status != "OK":
                         continue
 
                     raw_email = msg_data[0][1]
                     msg = email.message_from_bytes(raw_email)
 
-                    # Decode subject
                     subject = self._decode_header(msg.get("Subject", ""))
                     from_addr = self._decode_header(msg.get("From", ""))
-
-                    # Extract body
                     body = self._extract_body(msg)
 
+                    # Use Message-ID header as stable unique identifier
+                    message_id = msg.get("Message-ID", uid.decode())
+
                     messages.append({
-                        "id": mail_id.decode(),
+                        "id": message_id,
+                        "uid": uid.decode(),
                         "from_address": from_addr,
                         "subject": subject,
                         "body": body,

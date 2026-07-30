@@ -670,25 +670,26 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
         key_name = config.KEY_NAME
         log(f"   Setting key name: {key_name}")
         try:
-            # Wait for modal to appear
-            await page.wait_for_selector('[class*="modal"], [class*="dialog"], [role="dialog"]', timeout=10000)
+            # Wait for modal CONTENT to be visible (not just the overlay root)
+            # Ant Design modals: .ant-modal-body contains the actual form
+            await page.wait_for_selector('.ant-modal-body, [class*="modal-body"], [class*="modal"] form', timeout=10000)
+            await asyncio.sleep(1)
             await human_think("reading")
 
             # Find key name input — try multiple selectors
             key_name_input = None
             input_selectors = [
+                '.ant-modal-body input[type="text"]',
+                '.ant-modal-body input:not([type="hidden"])',
+                '[class*="modal-body"] input[type="text"]',
                 'input[placeholder*="name"]',
                 'input[placeholder*="Name"]',
-                'input[id*="name"]',
-                'input[id*="keyName"]',
                 'input[placeholder*="prod"]',
-                '[class*="modal"] input[type="text"]',
-                '[role="dialog"] input[type="text"]',
             ]
             for sel in input_selectors:
                 try:
                     el = page.locator(sel).first
-                    if await el.is_visible(timeout=1000):
+                    if await el.is_visible(timeout=2000):
                         key_name_input = el
                         log_debug(f"Found key name input: {sel}")
                         break
@@ -696,14 +697,14 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
                     continue
 
             if key_name_input:
-                # Clear default value and type new name
                 await human_click(page, key_name_input)
                 await key_name_input.fill("")
                 await human_type(page, key_name, min_delay=60, max_delay=150)
                 await human_think("normal")
             else:
-                log_warn("Key name input not found, trying first visible input...")
-                inputs = page.locator('[class*="modal"] input:visible, [role="dialog"] input:visible')
+                log_warn("Key name input not found with specific selectors, trying broader search...")
+                # Last resort: any visible text input inside the page
+                inputs = page.locator('input[type="text"]:visible')
                 count = await inputs.count()
                 if count > 0:
                     await human_click(page, inputs.first)
@@ -711,22 +712,25 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
                     await human_type(page, key_name, min_delay=60, max_delay=150)
                 else:
                     log_err("Could not find any input for key name")
+                    await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"no_key_input{suffix}.png"))
                     return None
 
         except Exception as e:
             log_err(f"Key name input error: {e}")
+            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"key_input_error{suffix}.png"))
             return None
 
         log("   Using default Service Mode (Economy)")
 
-        # Click "Create" button in modal — be specific to avoid clicking wrong button
+        # Click "Create" button in modal
         log("   Clicking 'Create'...")
         try:
-            # Look for Create button inside modal specifically
+            # Ant Design: buttons inside .ant-modal-footer or .ant-modal-body
             create_btn = None
             create_selectors = [
-                '[class*="modal"] button:has-text("Create"):not(:has-text("Key"))',
-                '[role="dialog"] button:has-text("Create"):not(:has-text("Key"))',
+                '.ant-modal-footer button:has-text("Create"):not(:has-text("Key"))',
+                '.ant-modal-body button:has-text("Create"):not(:has-text("Key"))',
+                '.ant-modal button.ant-btn-primary',
                 'button:has-text("Create"):not(:has-text("Key")):not(:has-text("Create Key"))',
             ]
             for sel in create_selectors:
@@ -744,14 +748,12 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             else:
                 log_warn("Create button not found, trying JS click...")
                 await page.evaluate("""() => {
-                    const modals = document.querySelectorAll('[class*="modal"], [role="dialog"]');
+                    const modals = document.querySelectorAll('.ant-modal-body, .ant-modal-footer');
                     for (const modal of modals) {
-                        const buttons = modal.querySelectorAll('button');
-                        for (const btn of buttons) {
-                            if (btn.textContent.trim() === 'Create') {
-                                btn.click();
-                                return true;
-                            }
+                        const btn = modal.querySelector('button.ant-btn-primary, button:last-child');
+                        if (btn && btn.textContent.trim().toLowerCase().includes('create')) {
+                            btn.click();
+                            return true;
                         }
                     }
                     return false;
