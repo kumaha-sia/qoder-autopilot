@@ -128,6 +128,13 @@ async def run_one(
         page = await browser.new_page()
         await setup_page(page)
 
+        # Clear any leftover login state (cookies, localStorage) from prior runs
+        try:
+            await page.context.clear_cookies()
+        except Exception:
+            pass
+        await page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e){} }")
+
         api_keys = await register_and_verify(
             page,
             email,

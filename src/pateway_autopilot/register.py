@@ -581,63 +581,65 @@ async def register_and_verify(
             except Exception:
                 log_debug("No invite code field found")
 
+        # DEBUG: verify state of OTP / pwd / confirm before clicking Sign up
+        try:
+            debug_state = await page.evaluate(
+                """() => {
+                    const ins = [...document.querySelectorAll('input')].filter(i => i.offsetParent);
+                    return ins.map(i => ({
+                        ph: i.placeholder || i.type,
+                        len: (i.value||'').length,
+                        val: (i.value||'').slice(0,30)
+                    }));
+                }"""
+            )
+            log_debug(f"   Inputs before Sign up: {debug_state}")
+            await page.screenshot(
+                path=str(config.SCREENSHOTS_DIR / f"before_signup_click{suffix}.png")
+            )
+        except Exception:
+            pass
+
         # Check ToS checkbox — From the actual PatewayAI UI, the checkbox text is:
         # "By signing up, you agree to our Terms of Service and Privacy Policy"
         # The checkbox is an Ant Design checkbox that sits ABOVE the Sign up button.
         # We must trigger the React onChange by clicking the wrapper element.
         await human_think("normal")
+        # ToS checkbox — use Playwright's .check() which synthetically clicks the
+        # input AND dispatches React-compatible events. Ant Design often ignores
+        # plain 'force click' on the wrapper.
         checkbox_checked = False
-        for _attempt in range(3):
+        for _attempt in range(4):
             try:
-                # Method 1: Click the Ant Design checkbox wrapper (the visible clickable area)
-                checkbox_wrapper = page.locator(
-                    '.ant-checkbox-wrapper, label:has(input[type="checkbox"])'
-                ).first
-                if await checkbox_wrapper.is_visible(timeout=2000):
-                    await checkbox_wrapper.click(force=True)
+                cb = page.locator('.ant-modal input[type="checkbox"]').first
+                if await cb.is_visible(timeout=2000):
+                    await cb.check()
                     await asyncio.sleep(0.5)
-                    is_checked = await page.evaluate(
-                        "() => document.querySelector('input[type=\"checkbox\"]')?.checked || false"
-                    )
+                    is_checked = await cb.is_checked()
                     if is_checked:
                         checkbox_checked = True
+                        log_ok("ToS checkbox checked")
                         break
-            except Exception:
-                pass
-
-            # Method 2: Click the checkbox text label (e.g. "By signing up, you agree...")
-            try:
-                tos_label = page.locator('label:has-text("Terms"), span:has-text("Terms")').first
-                if await tos_label.is_visible(timeout=2000):
-                    await tos_label.click(force=True)
-                    await asyncio.sleep(0.5)
-                    is_checked = await page.evaluate(
-                        "() => document.querySelector('input[type=\"checkbox\"]')?.checked || false"
+                    # fallback: JS direct
+                    await page.evaluate(
+                        "() => { const cb=document.querySelector('.ant-modal input[type=checkbox]');"
+                        " if(cb && !cb.checked) cb.click(); }"
                     )
+                    await asyncio.sleep(0.4)
+                    is_checked = await cb.is_checked()
                     if is_checked:
                         checkbox_checked = True
+                        log_ok("ToS checkbox checked (JS fallback)")
                         break
-            except Exception:
-                pass
-
-            # Method 3: JS click the native input
-            try:
-                await page.evaluate("""() => {
-                    const cb = document.querySelector('input[type="checkbox"]');
-                    if (cb) cb.click();
-                }""")
-                await asyncio.sleep(0.5)
-                is_checked = await page.evaluate(
-                    "() => document.querySelector('input[type=\"checkbox\"]')?.checked || false"
-                )
-                if is_checked:
-                    checkbox_checked = True
-                    break
-            except Exception:
-                pass
+            except Exception as exc:
+                log_debug(f"Checkbox attempt {_attempt+1} error: {exc}")
 
         if not checkbox_checked:
-            log_warn("Could not verify ToS checkbox is checked — form may not submit")
+            log_err("ToS checkbox FAILED to check — submit will not work")
+            await page.screenshot(
+                path=str(config.SCREENSHOTS_DIR / f"checkbox_failed{suffix}.png")
+            )
+            return None
 
         # Scroll down naturally
         await human_scroll(page, "down", random.randint(100, 300))
@@ -666,19 +668,32 @@ async def register_and_verify(
                 await asyncio.sleep(2)
                 continue
 
-            # Click via JS — dispatch React-compatible click event
-            await page.evaluate("""() => {
-                const buttons = document.querySelectorAll('button[type="submit"], button');
-                for (const btn of buttons) {
-                    const t = btn.textContent.toLowerCase().trim();
-                    if ((t.includes('sign up') || t.includes('注册')) && !btn.disabled) {
-                        btn.click();
-                        return true;
+            # Click via Playwright (synthesizes real mouse events incl. hover)
+            # then fall back to JS dispatch only if Playwright times out.
+            clicked = False
+            try:
+                btn = page.locator('.ant-modal button:has-text("Sign up")').first
+                if await btn.is_visible(timeout=2000):
+                    await btn.click(timeout=5000)
+                    clicked = True
+            except Exception as _e:
+                log_debug(f"Playwright click Sign up failed: {_e}, using JS dispatch")
+                await page.evaluate("""() => {
+                    const buttons = document.querySelectorAll('.ant-modal button, button[type=submit]');
+                    for (const btn of buttons) {
+                        const t = btn.textContent.toLowerCase().trim();
+                        if ((t.includes('sign up') || t.includes('注册')) && !btn.disabled) {
+                            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                            btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                            btn.click();
+                            return true;
+                        }
                     }
-                }
-                return false;
-            }""")
-            signup_clicked = True
+                    return false;
+                }""")
+                clicked = True
+            if clicked:
+                signup_clicked = True
             break
 
         if not signup_clicked:
@@ -695,9 +710,22 @@ async def register_and_verify(
                 return false;
             }""")
 
-        # Wait for response
+        # Wait for response — also surface any toast/error the UI shows
         await human_think("careful")
         await asyncio.sleep(random.uniform(2, 4))
+        try:
+            toasts = await page.evaluate(
+                """() => {
+                    const t = [...document.querySelectorAll(
+                        '.ant-message-notice-content, .ant-form-item-explain-error, [class*=error], [class*=toast], [class*=notice]'
+                    )].map(e => (e.textContent||'').trim()).filter(s => s && s.length < 200);
+                    return t;
+                }"""
+            )
+            if toasts:
+                log(f"   UI toasts/errors after Sign up: {toasts}")
+        except Exception:
+            pass
 
         # ═══ STEP 6: Verify account creation ═══
         log_step(6, 7, "Verifying account creation...")
@@ -713,9 +741,13 @@ async def register_and_verify(
 
             current_url = page.url
             page_text = await page.evaluate(
-                "() => document.body?.innerText?.substring(0, 1000) || ''"
+                "() => document.body?.innerText || ''"
             )
             page_text_lower = page_text.lower()
+
+            # DEBUG: show first 400 chars of body text so we can see what UI is showing
+            if signup_success is False:
+                log_debug(f"   Body text (first 400): {page_text[:400]!r}")
 
             # Check for success indicators
             # From actual PatewayAI UI: "Account created" with "◆3 reward has been added"
@@ -723,6 +755,9 @@ async def register_and_verify(
                 "account created" in page_text_lower
                 or "注册成功" in page_text_lower
                 or "reward has been added" in page_text_lower
+                or "reward has been added" in page_text
+                or "congratulations" in page_text_lower
+                or "successfully registered" in page_text_lower
             )
             has_error = "failed" in page_text_lower and "sign up" in page_text_lower
 
@@ -790,16 +825,31 @@ async def register_and_verify(
         await human_think("normal")
 
         # ═══ STEP 7: Create 2 API keys (Default + Economy) ═══
+        # Between keys, make sure no lingering modal blocks the next create.
+        async def _close_any_modal():
+            try:
+                await page.evaluate("""() => {
+                    const closeBtns = document.querySelectorAll(
+                        '.ant-modal-close, .ant-modal button:has-text(\"Done\"), .ant-modal button:has-text(\"Close\")'
+                    );
+                    for (const b of closeBtns) b.click();
+                }""")
+                await asyncio.sleep(1)
+            except Exception:
+                pass
+
         log("   Creating Default Mode key...")
         key_default = await create_api_key(
             page, acct_num=acct_num, key_name="autopilot-default", service_mode="default"
         )
+        await _close_any_modal()
         await asyncio.sleep(random.uniform(2, 4))
 
         log("   Creating Economy Mode key...")
         key_economy = await create_api_key(
             page, acct_num=acct_num, key_name="autopilot-economy", service_mode="economy"
         )
+        await _close_any_modal()
 
         if key_default or key_economy:
             if key_default:
@@ -876,15 +926,21 @@ async def create_api_key(
         nonlocal captured_key
         try:
             url = response.url
-            if any(kw in url for kw in ["apikey", "api-key", "key/create", "keys"]):
-                body = await response.json()
-                import re
+            # Skip huge/binary endpoints quickly
+            ct = response.headers.get("content-type", "")
+            if "json" not in ct and "javascript" not in ct and "text" not in ct:
+                return
+            body = await response.text()
+            if not body or len(body) > 500_000:
+                return
+            if any(kw in url for kw in ["apikey", "api-key", "key", "keys"]):
+                log_debug(f"   NetResp {url[:120]}: {len(body)}B")
+            import re
 
-                body_str = str(body)
-                match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body_str)
-                if match:
-                    captured_key = match.group(0)
-                    log_ok(f"API key intercepted from response: {mask_value(captured_key)}")
+            match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body)
+            if match:
+                captured_key = match.group(0)
+                log_ok(f"API key intercepted from response: {mask_value(captured_key)}")
         except Exception:
             pass
 
@@ -892,6 +948,22 @@ async def create_api_key(
 
     try:
         log("   Preparing to create API key...")
+        # Close any blocking modal left over from a previous create attempt —
+        # the console-key-modal will otherwise hide the Create Key button.
+        try:
+            await page.evaluate("""() => {
+                const modals = document.querySelectorAll('.ant-modal-wrap');
+                for (const m of modals) {
+                    // Only close if the modal is visible
+                    if (m.offsetParent) {
+                        const cb = m.querySelector('.ant-modal-close, .ant-modal-close-x, button[aria-label=close]');
+                        if (cb) cb.click();
+                    }
+                }
+            }""")
+            await asyncio.sleep(1)
+        except Exception:
+            pass
         await human_think("normal")
 
         # Wait for console page to fully load (SPA rendering)
@@ -970,15 +1042,16 @@ async def create_api_key(
             await asyncio.sleep(1)
             await human_think("reading")
 
-            # Find key name input — try multiple selectors
+            # Find key name input — must be INSIDE the Create Key modal to avoid
+            # accidentally filling the OTP "code" field from the signup flow (whose
+            # placeholder also contains the substring "name"/"code").
             key_name_input = None
             input_selectors = [
+                '.ant-modal-body input[placeholder="e.g. Office"]',
+                '.ant-modal-body input[placeholder*="Office"]',
                 '.ant-modal-body input[type="text"]',
                 '.ant-modal-body input:not([type="hidden"])',
-                '[class*="modal-body"] input[type="text"]',
-                'input[placeholder*="name"]',
-                'input[placeholder*="Name"]',
-                'input[placeholder*="prod"]',
+                '[class*="modal-body"] input[placeholder*="Office"]',
             ]
             for sel in input_selectors:
                 try:
