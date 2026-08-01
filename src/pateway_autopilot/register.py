@@ -942,7 +942,25 @@ async def create_api_key(
         except Exception:
             pass
 
+
+    # Also log ALL outgoing requests (not just responses) so we can see what
+    # "Create" actually triggers — POST /key/create, WS frame, etc.
+    async def on_request(request):
+        try:
+            if request.method in ("POST", "PUT", "PATCH"):
+                log(f"   REQ {request.method} {request.url[:140]}")
+        except Exception:
+            pass
+
+    # Also sniff WebSocket frames — the create may go through WS
+    def on_websocket(ws):
+        log(f"   WS opened: {ws.url}")
+        ws.on("framereceived", lambda payload: log(f"   WS << {payload[:400]!r}"))
+        ws.on("framesent", lambda payload: log(f"   WS >> {payload[:200]!r}"))
+
     page.on("response", on_response)
+    page.on("request", on_request)
+    page.on("websocket", on_websocket)
 
     try:
         log("   Preparing to create API key...")
@@ -1093,6 +1111,25 @@ async def create_api_key(
 
         # ═══ Select Service Mode (card-style radio in PatewayAI modal) ═══
         await _select_service_mode(page, service_mode)
+
+        # ═══ Turn OFF "Monthly Spending Limit" switch (if it's on) ═══
+        # We want unlimited spend by default, so toggle the switch to OFF.
+        try:
+            switch = page.locator(
+                '.ant-modal-body .ant-switch[role="switch"]'
+            ).first
+            if await switch.is_visible(timeout=2000):
+                checked = await switch.get_attribute("aria-checked")
+                cls = await switch.get_attribute("class") or ""
+                is_on = checked == "true" or "ant-switch-checked" in cls
+                if is_on:
+                    await switch.click()
+                    await asyncio.sleep(0.5)
+                    log("   Monthly Spending Limit switched to OFF")
+                else:
+                    log_debug("   Monthly Spending Limit already OFF")
+        except Exception as exc:
+            log_debug(f"   Monthly Spending Limit toggle not found/error: {exc}")
 
         # Click "Create" button in modal
         log("   Clicking 'Create'...")
