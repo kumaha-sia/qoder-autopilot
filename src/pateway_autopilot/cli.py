@@ -128,12 +128,18 @@ async def run_one(
         page = await browser.new_page()
         await setup_page(page)
 
-        # Clear any leftover login state (cookies, localStorage) from prior runs
+        # Wipe any prior auth state so each account starts from a cold signup form
         try:
             await page.context.clear_cookies()
         except Exception:
             pass
-        await page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e){} }")
+        try:
+            await page.evaluate("""() => {
+                localStorage.clear();
+                sessionStorage.clear();
+            }""")
+        except Exception:
+            pass
 
         api_keys = await register_and_verify(
             page,
