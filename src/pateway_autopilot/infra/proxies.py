@@ -40,7 +40,7 @@ def parse_proxy_line(line: str) -> str | None:
         log_warn(f"Invalid proxy: missing host or port in {line[:20]}...")
         return None
 
-    return f"socks5://{user}:{password}@{host}:{port}"
+    return f"http://{user}:{password}@{host}:{port}"
 
 
 def load_proxies(filepath: str) -> list[str]:
