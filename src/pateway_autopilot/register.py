@@ -1216,6 +1216,21 @@ async def create_api_key(
         except Exception as exc:
             log_debug(f"expect_response failed: {exc}")
 
+        if captured_key and "..." not in captured_key and "***" not in captured_key:
+            # Already have full key from network — use it
+            pass
+        else:
+            # Key from network is masked (e.g. 'sk-ptw...bq5O') — try UI modal
+            # which displays the real key in <code>/<pre> or input element
+            log("   Network key is masked — falling back to UI-extraction")
+            try:
+                ui_key = await _extract_key_from_ui(page)
+                if ui_key:
+                    captured_key = ui_key
+                    log_ok(f"API key from UI modal: {mask_value(captured_key)}")
+            except Exception as _e:
+                log_debug(f"UI-extraction error: {_e}")
+
         if not captured_key:
             # Brief UI-modal look as fallback
             try:
