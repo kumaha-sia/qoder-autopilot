@@ -15,14 +15,12 @@ Complete 7-step registration with human-like behavior:
 import asyncio
 import random
 import time
-from typing import Optional
 
 from .auth.credentials import mask_value
+from .captcha.slider import ManualSolver, SliderSolver
 from .infra import config
 from .infra.temp_mail import TempMailClient
-from .captcha.slider import SliderSolver, ManualSolver
-from .utils.logger import log, log_ok, log_err, log_warn, log_step, log_debug
-
+from .utils.logger import log, log_debug, log_err, log_ok, log_step, log_warn
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HUMAN-LIKE BEHAVIOR HELPERS
@@ -38,11 +36,11 @@ async def human_delay(min_ms: int = 500, max_ms: int = 2000):
 async def human_think(pause_type: str = "normal"):
     """Simulate human thinking time based on action type."""
     delays = {
-        "quick": (200, 500),      # Quick glance
-        "normal": (500, 1500),    # Normal thinking
+        "quick": (200, 500),  # Quick glance
+        "normal": (500, 1500),  # Normal thinking
         "careful": (1000, 2500),  # Careful consideration
         "reading": (1500, 3000),  # Reading content
-        "typing": (50, 150),      # Between keystrokes
+        "typing": (50, 150),  # Between keystrokes
     }
     min_ms, max_ms = delays.get(pause_type, delays["normal"])
     await human_delay(min_ms, max_ms)
@@ -75,7 +73,7 @@ async def human_move_mouse(page, x: int, y: int):
 
 async def human_type(page, text: str, min_delay: int = 30, max_delay: int = 120):
     """Type text with human-like speed variation."""
-    for i, char in enumerate(text):
+    for _i, char in enumerate(text):
         await page.keyboard.type(char, delay=random.randint(min_delay, max_delay))
         # Occasionally pause longer (like thinking about next char)
         if random.random() < 0.1:  # 10% chance of longer pause
@@ -130,13 +128,12 @@ async def random_mouse_movement(page):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-async def _wait_for_manual_otp(page, timeout: int = 120) -> Optional[str]:
+async def _wait_for_manual_otp(page, timeout: int = 120) -> str | None:
     """Wait for user to manually enter OTP in the browser.
 
     Monitors OTP input fields for user entry.
     Returns the entered OTP string, or None if timeout.
     """
-    import time
     start = time.time()
     log("   ⌨️  Type the OTP code in the browser window...")
 
@@ -209,7 +206,7 @@ async def register_and_verify(
     manual_captcha: bool = False,
     acct_num: int = 0,
     invite_code: str = "",
-) -> Optional[str]:
+) -> dict | None:
     """Full PatewayAI registration flow with human-like behavior.
 
     Args:
@@ -222,7 +219,8 @@ async def register_and_verify(
         invite_code: Optional invite code.
 
     Returns:
-        API key string if successful, None otherwise.
+        Dict {"default": sk-..., "economy": sk-...} if at least one key
+        captured, else None.
     """
     config.SCREENSHOTS_DIR.mkdir(exist_ok=True)
     slider_solver = SliderSolver(max_attempts=config.MAX_CAPTCHA_ATTEMPTS)
@@ -241,7 +239,9 @@ async def register_and_verify(
 
         # ═══ STEP 2: Click "Get Started" ═══
         log_step(2, 7, "Clicking 'Get Started'...")
-        get_started = page.locator('button:has-text("Get Started"), a:has-text("Get Started")').first
+        get_started = page.locator(
+            'button:has-text("Get Started"), a:has-text("Get Started")'
+        ).first
 
         # Move mouse around a bit before clicking
         await random_mouse_movement(page)
@@ -266,7 +266,7 @@ async def register_and_verify(
         await human_think("careful")
         await page.wait_for_timeout(3000)
         await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"after_get_started{suffix}.png"))
-        
+
         # Debug: check what page we're on
         current_url = page.url
         page_title = await page.title()
@@ -274,7 +274,9 @@ async def register_and_verify(
 
         # Check if email input is visible — if not, try direct signup navigation
         try:
-            await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=5000)
+            await page.wait_for_selector(
+                'input[type="email"], input[placeholder*="example"]', timeout=5000
+            )
         except Exception:
             log_debug("Email input not found after Get Started — checking for auth modal")
             # Check if auth modal is already visible (sometimes modal opens but email input
@@ -291,13 +293,19 @@ async def register_and_verify(
             else:
                 log_warn("Email input not found — trying direct navigation to signup")
                 try:
-                    await page.goto(f"{config.PATEWAY_URL}/#/signup", wait_until="networkidle", timeout=15000)
+                    await page.goto(
+                        f"{config.PATEWAY_URL}/#/signup", wait_until="networkidle", timeout=15000
+                    )
                     await human_think("reading")
-                    await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"after_signup_nav{suffix}.png"))
+                    await page.screenshot(
+                        path=str(config.SCREENSHOTS_DIR / f"after_signup_nav{suffix}.png")
+                    )
                 except Exception:
                     pass
                 try:
-                    await page.wait_for_selector('input[type="email"], input[placeholder*="example"]', timeout=10000)
+                    await page.wait_for_selector(
+                        'input[type="email"], input[placeholder*="example"]', timeout=10000
+                    )
                 except Exception:
                     log_err("Still cannot find email input — page structure may have changed")
                     return None
@@ -327,7 +335,7 @@ async def register_and_verify(
             'button:has-text("发送")',
             'button:has-text("Send Code")',
             '.auth-modal button[type="submit"]',
-            '.auth-modal .ant-btn-primary',
+            ".auth-modal .ant-btn-primary",
         ]
         for sel in send_code_selectors:
             try:
@@ -393,7 +401,9 @@ async def register_and_verify(
                 }""")
                 if error_text:
                     log_err(f"Send code failed: {error_text}")
-                    await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png"))
+                    await page.screenshot(
+                        path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png")
+                    )
                     return None
             except Exception:
                 pass
@@ -446,7 +456,9 @@ async def register_and_verify(
                 pass
 
         if not captcha_visible and not otp_modal_visible:
-            page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
+            page_text = await page.evaluate(
+                "() => document.body?.innerText?.substring(0, 500) || ''"
+            )
             log_err("No CAPTCHA or registration modal appeared after Send code.")
             log_debug(f"Page text: {page_text[:300]}")
             await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"no_captcha{suffix}.png"))
@@ -467,7 +479,9 @@ async def register_and_verify(
 
             if not captcha_ok:
                 log_err("CAPTCHA solve failed!")
-                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"captcha_fail{suffix}.png"))
+                await page.screenshot(
+                    path=str(config.SCREENSHOTS_DIR / f"captcha_fail{suffix}.png")
+                )
                 return None
 
             # Wait after captcha solve (email being sent)
@@ -501,7 +515,7 @@ async def register_and_verify(
         else:
             # User provided their own email — ask for OTP manually
             log(f"   ⏳ Waiting for OTP to {email}...")
-            log(f"   📧 Check your email inbox and enter the OTP in the browser")
+            log("   📧 Check your email inbox and enter the OTP in the browser")
             # Wait for manual OTP entry
             otp = await _wait_for_manual_otp(page, timeout=config.OTP_TIMEOUT)
             if not otp:
@@ -515,7 +529,9 @@ async def register_and_verify(
 
         # Fill OTP — PatewayAI uses single input field (not per-digit)
         log_step(5, 7, "Entering OTP and password...")
-        otp_input = page.locator('input[placeholder*="code"], input[placeholder*="OTP"], input[placeholder*="验证"]').first
+        otp_input = page.locator(
+            'input[placeholder*="code"], input[placeholder*="OTP"], input[placeholder*="验证"]'
+        ).first
         try:
             await otp_input.wait_for(state="visible", timeout=5000)
             await otp_input.fill(otp)
@@ -570,10 +586,12 @@ async def register_and_verify(
         # We must trigger the React onChange by clicking the wrapper element.
         await human_think("normal")
         checkbox_checked = False
-        for attempt in range(3):
+        for _attempt in range(3):
             try:
                 # Method 1: Click the Ant Design checkbox wrapper (the visible clickable area)
-                checkbox_wrapper = page.locator('.ant-checkbox-wrapper, label:has(input[type="checkbox"])').first
+                checkbox_wrapper = page.locator(
+                    '.ant-checkbox-wrapper, label:has(input[type="checkbox"])'
+                ).first
                 if await checkbox_wrapper.is_visible(timeout=2000):
                     await checkbox_wrapper.click(force=True)
                     await asyncio.sleep(0.5)
@@ -643,7 +661,7 @@ async def register_and_verify(
                 return { enabled: false, text: '' };
             }""")
             if not btn_state.get("enabled"):
-                log_debug(f"Sign up button disabled (attempt {attempt+1}/5), waiting...")
+                log_debug(f"Sign up button disabled (attempt {attempt + 1}/5), waiting...")
                 await asyncio.sleep(2)
                 continue
 
@@ -734,7 +752,9 @@ async def register_and_verify(
 
             if has_error:
                 log_err("Signup failed — error detected on page")
-                await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"signup_error{suffix}.png"))
+                await page.screenshot(
+                    path=str(config.SCREENSHOTS_DIR / f"signup_error{suffix}.png")
+                )
                 return None
 
             # Check if already redirected to console
@@ -752,13 +772,29 @@ async def register_and_verify(
 
         await human_think("normal")
 
-        # ═══ STEP 7: Create API key ═══
-        api_key = await create_api_key(page, acct_num=acct_num)
-        if api_key:
-            log_ok(f"API Key captured: {mask_value(api_key)}")
-            return api_key
+        # ═══ STEP 7: Create 2 API keys (Default + Economy) ═══
+        log("   Creating Default Mode key...")
+        key_default = await create_api_key(
+            page, acct_num=acct_num, key_name="autopilot-default", service_mode="default"
+        )
+        await asyncio.sleep(random.uniform(2, 4))
+
+        log("   Creating Economy Mode key...")
+        key_economy = await create_api_key(
+            page, acct_num=acct_num, key_name="autopilot-economy", service_mode="economy"
+        )
+
+        if key_default or key_economy:
+            if key_default:
+                log_ok(f"API Key (default): {mask_value(key_default)}")
+            if key_economy:
+                log_ok(f"API Key (economy): {mask_value(key_economy)}")
+            return {
+                "default": key_default,
+                "economy": key_economy,
+            }
         else:
-            log_err("Failed to capture API key")
+            log_err("Failed to capture any API key")
             return None
 
     except Exception as e:
@@ -770,8 +806,51 @@ async def register_and_verify(
         return None
 
 
-async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
-    """Create and capture API key from Console with human-like behavior."""
+async def _select_service_mode(page, service_mode: str) -> None:
+    """Click the Service Mode card in the Create Key modal.
+
+    PatewayAI's Create Key modal has two card-style options:
+    'Default Mode' and 'Economy'. We click the matching one. The
+    monthly-limit input is left at its default placeholder (Minimum 0.10)
+    to keep behavior consistent with existing runs.
+    """
+    target = "Default Mode" if service_mode == "default" else "Economy"
+    log(f"   Selecting Service Mode: {target}")
+    try:
+        result = await page.evaluate(
+            """(target) => {
+                const candidates = [...document.querySelectorAll(
+                    '.ant-modal button, .ant-modal [role=button], .ant-modal [class*=card], .ant-modal [class*=option], .ant-modal [class*=item]'
+                )].filter(el => el.offsetParent && (el.textContent||'').includes(target));
+                if (!candidates.length) return 'not-found';
+                candidates[0].click();
+                return 'clicked';
+            }""",
+            target,
+        )
+        log_debug(f"   service mode click: {result}")
+        if result != "clicked":
+            log_warn(f"Could not find Service Mode card '{target}', leaving default selection")
+        await asyncio.sleep(random.uniform(0.4, 0.9))
+    except Exception as exc:  # noqa: BLE001
+        log_warn(f"Service mode selection failed ({target}): {exc}")
+
+
+async def create_api_key(
+    page,
+    acct_num: int = 0,
+    key_name: str | None = None,
+    service_mode: str = "default",
+) -> str | None:
+    """Create and capture API key from Console with human-like behavior.
+
+    Args:
+        page: Playwright page object.
+        acct_num: Account number for logging/screenshot filenames.
+        key_name: Display name for the key (defaults to config.KEY_NAME).
+        service_mode: "default" or "economy" – clicks the matching Service
+                      Mode card in the Create Key modal.
+    """
     suffix = f"_{acct_num}" if acct_num else ""
     captured_key = None
 
@@ -782,6 +861,7 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             if any(kw in url for kw in ["apikey", "api-key", "key/create", "keys"]):
                 body = await response.json()
                 import re
+
                 body_str = str(body)
                 match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body_str)
                 if match:
@@ -802,7 +882,7 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             # Wait for API Keys table or "Create Key" button to appear
             await page.wait_for_selector(
                 'button:has-text("Create Key"), table, [class*="api-key"], [class*="empty"]',
-                timeout=15000
+                timeout=15000,
             )
             log_ok("Console page loaded")
         except Exception:
@@ -814,9 +894,7 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
 
         await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"before_create_key{suffix}.png"))
 
-        page_text = await page.evaluate(
-            "() => document.body?.innerText?.substring(0, 500) || ''"
-        )
+        page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
         log_debug(f"Page text: {page_text[:200]}")
 
         # Find Create Key button
@@ -863,12 +941,14 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             await human_think("normal")
 
         # Wait for Create Key modal to appear, then fill key name
-        key_name = config.KEY_NAME
+        key_name = key_name or config.KEY_NAME
         log(f"   Setting key name: {key_name}")
         try:
             # Wait for modal CONTENT to be visible (not just the overlay root)
             # Ant Design modals: .ant-modal-body contains the actual form
-            await page.wait_for_selector('.ant-modal-body, [class*="modal-body"], [class*="modal"] form', timeout=10000)
+            await page.wait_for_selector(
+                '.ant-modal-body, [class*="modal-body"], [class*="modal"] form', timeout=10000
+            )
             await asyncio.sleep(1)
             await human_think("reading")
 
@@ -896,7 +976,9 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
                 await key_name_input.fill(key_name)
                 log_debug(f"Key name set to: {key_name}")
             else:
-                log_warn("Key name input not found with specific selectors, trying broader search...")
+                log_warn(
+                    "Key name input not found with specific selectors, trying broader search..."
+                )
                 # Last resort: any visible text input inside the page
                 inputs = page.locator('input[type="text"]:visible')
                 count = await inputs.count()
@@ -904,7 +986,9 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
                     await inputs.first.fill(key_name)
                 else:
                     log_err("Could not find any input for key name")
-                    await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"no_key_input{suffix}.png"))
+                    await page.screenshot(
+                        path=str(config.SCREENSHOTS_DIR / f"no_key_input{suffix}.png")
+                    )
                     return None
 
         except Exception as e:
@@ -912,7 +996,8 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"key_input_error{suffix}.png"))
             return None
 
-        log("   Using default Service Mode (Economy)")
+        # ═══ Select Service Mode (card-style radio in PatewayAI modal) ═══
+        await _select_service_mode(page, service_mode)
 
         # Click "Create" button in modal
         log("   Clicking 'Create'...")
@@ -922,7 +1007,7 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             create_selectors = [
                 '.ant-modal-footer button:has-text("Create"):not(:has-text("Key"))',
                 '.ant-modal-body button:has-text("Create"):not(:has-text("Key"))',
-                '.ant-modal button.ant-btn-primary',
+                ".ant-modal button.ant-btn-primary",
                 'button:has-text("Create"):not(:has-text("Key")):not(:has-text("Create Key"))',
             ]
             for sel in create_selectors:
@@ -968,10 +1053,7 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
         log("   Waiting for Key Created modal...")
         try:
             # Wait for the key created modal text to appear
-            await page.wait_for_selector(
-                'text="Key Created", text="key created"',
-                timeout=10000
-            )
+            await page.wait_for_selector('text="Key Created", text="key created"', timeout=10000)
             log_ok("Key Created modal detected")
             await human_think("reading")
         except Exception:
@@ -1025,7 +1107,7 @@ async def create_api_key(page, acct_num: int = 0) -> Optional[str]:
             pass
 
 
-async def _extract_key_from_ui(page) -> Optional[str]:
+async def _extract_key_from_ui(page) -> str | None:
     """Extract API key from the 'Key Created' modal."""
     try:
         import re
@@ -1058,7 +1140,7 @@ async def _extract_key_from_ui(page) -> Optional[str]:
     return None
 
 
-async def _extract_key_from_clipboard(page) -> Optional[str]:
+async def _extract_key_from_clipboard(page) -> str | None:
     """Extract API key by clicking copy button and reading clipboard."""
     try:
         import re

@@ -128,7 +128,7 @@ async def run_one(
         page = await browser.new_page()
         await setup_page(page)
 
-        api_key = await register_and_verify(
+        api_keys = await register_and_verify(
             page,
             email,
             ident,
@@ -139,7 +139,7 @@ async def run_one(
         )
 
         # Keep browser open briefly so user can see what happened
-        if not api_key:
+        if not api_keys:
             log_warn("Registration failed — browser will stay open for 10s for inspection")
             await asyncio.sleep(10)
         else:
@@ -152,7 +152,7 @@ async def run_one(
     if temp_mail:
         await temp_mail.close()
 
-    if not api_key:
+    if not api_keys:
         log_err("Registration/API key creation failed!")
         save_creds(
             {
@@ -164,22 +164,35 @@ async def run_one(
         )
         return None
 
-    log_ok("Account registered & API key created! ✅")
+    log_ok("Account registered & API keys created! ✅")
 
     # Save credentials
+    key_default = api_keys.get("default")
+    key_economy = api_keys.get("economy")
     save_creds(
         {
             "email": email,
             "password": ident["password"],
             "display_name": ident["display_name"],
-            "api_key": api_key,
+            "api_key_default": key_default,
+            "api_key_economy": key_economy,
+            # Backward-compat alias: legacy readers use api_key
+            "api_key": key_default or key_economy,
             "base_url": config.PATEWAY_API_URL,
             "status": "success",
         }
     )
 
-    log_ok(f"🎉 {email} → API Key: {mask_value(api_key)}")
-    return {"email": email, "password": ident["password"], "api_key": api_key}
+    if key_default:
+        log_ok(f"🎉 {email} → Default: {mask_value(key_default)}")
+    if key_economy:
+        log_ok(f"🎉 {email} → Economy: {mask_value(key_economy)}")
+    return {
+        "email": email,
+        "password": ident["password"],
+        "api_key_default": key_default,
+        "api_key_economy": key_economy,
+    }
 
 
 async def main_async(args: argparse.Namespace) -> None:
