@@ -935,7 +935,7 @@ async def create_api_key(
                 return
             # Always log POST responses (potential key creation endpoint)
             if response.request.method == "POST":
-                log_debug(f"   POST {url[:120]}: {len(body)}B :: {body[:300]!r}")
+                log(f"   POST {url[:120]}: {len(body)}B :: {body[:300]!r}")
             import re
 
             match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body)
@@ -949,22 +949,28 @@ async def create_api_key(
 
     try:
         log("   Preparing to create API key...")
-        # Close any blocking modal left over from a previous create attempt —
+        # Close any *visible* Ant Design modal left over from a previous create attempt —
         # the console-key-modal will otherwise hide the Create Key button.
-        try:
-            await page.evaluate("""() => {
-                const modals = document.querySelectorAll('.ant-modal-wrap');
-                for (const m of modals) {
-                    // Only close if the modal is visible
-                    if (m.offsetParent) {
-                        const cb = m.querySelector('.ant-modal-close, .ant-modal-close-x, button[aria-label=close]');
-                        if (cb) cb.click();
-                    }
-                }
-            }""")
-            await asyncio.sleep(1)
-        except Exception:
-            pass
+        for _ in range(3):
+            try:
+                visible_close = page.locator(".ant-modal-wrap:visible .ant-modal-close").first
+                if await visible_close.is_visible(timeout=1500):
+                    log_debug("   Closing leftover modal via ant-modal-close")
+                    await visible_close.click()
+                    await asyncio.sleep(0.6)
+                    continue
+                # legacy fallback: "Done" or "Close" button
+                done_btn = page.locator(
+                    '.ant-modal button:has-text("Done"), .ant-modal button:has-text("Close")'
+                ).first
+                if await done_btn.is_visible(timeout=800):
+                    log_debug("   Closing leftover modal via Done button")
+                    await done_btn.click()
+                    await asyncio.sleep(0.6)
+                    continue
+                break
+            except Exception:
+                break
         await human_think("normal")
 
         # Wait for console page to fully load (SPA rendering)
