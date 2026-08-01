@@ -124,6 +124,175 @@ async def random_mouse_movement(page):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CLOUDFLARE TURNSTILE HANDLER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def _handle_cloudflare_turnstile(page, timeout: int = 30) -> bool:
+    """Detect and handle Cloudflare Turnstile challenge checkbox.
+
+    Turnstile appears as an iframe from challenges.cloudflare.com with a
+    checkbox inside. We simulate human-like mouse movement to the checkbox
+    and click it.
+
+    Returns True if Turnstile was found and handled (or not present),
+    False if found but could not solve.
+    """
+
+    # Check for Turnstile iframe
+    try:
+        turnstile_iframe = await page.evaluate("""() => {
+            // Look for Cloudflare Turnstile iframe
+            const iframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]');
+            for (const iframe of iframes) {
+                if (iframe.offsetParent !== null) {
+                    const rect = iframe.getBoundingClientRect();
+                    return {
+                        found: true,
+                        width: rect.width,
+                        height: rect.height,
+                        x: rect.x,
+                        y: rect.y,
+                        src: iframe.src.substring(0, 100)
+                    };
+                }
+            }
+            // Also check for cf-turnstile container (sometimes the iframe is inside)
+            const containers = document.querySelectorAll(
+                '[class*="turnstile"], [id*="turnstile"], [class*="cf-challenge"]'
+            );
+            for (const c of containers) {
+                if (c.offsetParent !== null) {
+                    const rect = c.getBoundingClientRect();
+                    return {
+                        found: true,
+                        width: rect.width,
+                        height: rect.height,
+                        x: rect.x,
+                        y: rect.y,
+                        src: 'container'
+                    };
+                }
+            }
+            return { found: false };
+        }""")
+
+        if not turnstile_iframe.get("found"):
+            log_debug("No Cloudflare Turnstile detected")
+            return True
+
+        log("   🔒 Cloudflare Turnstile detected — handling challenge...")
+
+        # Wait for Turnstile to fully load
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+
+        # Try to find and click the checkbox inside the Turnstile iframe
+        # Turnstile iframe has a checkbox input we need to click
+        for attempt in range(3):
+            try:
+                # Find the Turnstile iframe
+                iframe_locators = page.locator('iframe[src*="challenges.cloudflare.com"]')
+                iframe_count = await iframe_locators.count()
+
+                if iframe_count > 0:
+                    for i in range(iframe_count):
+                        try:
+                            iframe = iframe_locators.nth(i)
+                            if not await iframe.is_visible(timeout=2000):
+                                continue
+
+                            # Get iframe position for human-like mouse movement
+                            box = await iframe.bounding_box()
+                            if box:
+                                # Move mouse toward the iframe with human-like curve
+                                target_x = box["x"] + box["width"] / 2
+                                target_y = box["y"] + box["height"] / 2
+                                await human_move_mouse(page, int(target_x), int(target_y))
+                                await human_delay(300, 600)
+
+                            # Try to access the iframe's frame and click the checkbox
+                            frame = await iframe.content_frame()
+                            if frame:
+                                checkbox = frame.locator('input[type="checkbox"]').first
+                                if await checkbox.is_visible(timeout=3000):
+                                    await human_delay(500, 1200)
+                                    await checkbox.click(timeout=5000)
+                                    log_ok("Turnstile checkbox clicked via iframe")
+                                    await asyncio.sleep(random.uniform(2, 4))
+
+                                    # Check if Turnstile was solved
+                                    solved = await _check_turnstile_solved(page)
+                                    if solved:
+                                        log_ok("Cloudflare Turnstile solved! ✅")
+                                        return True
+                        except Exception as e:
+                            log_debug(f"Turnstile iframe attempt {i} failed: {e}")
+                            continue
+            except Exception as e:
+                log_debug(f"Turnstile attempt {attempt + 1} failed: {e}")
+
+            await asyncio.sleep(random.uniform(1, 2))
+
+        # If iframe approach failed, try clicking directly on the Turnstile container area
+        try:
+            if turnstile_iframe.get("found"):
+                x = int(turnstile_iframe.get("x", 0)) + random.randint(10, 30)
+                y = int(turnstile_iframe.get("y", 0)) + random.randint(5, 15)
+                await human_move_mouse(page, x, y)
+                await human_delay(500, 1000)
+                await page.mouse.click(x, y)
+                log_debug("Clicked Turnstile area directly")
+                await asyncio.sleep(random.uniform(2, 4))
+
+                solved = await _check_turnstile_solved(page)
+                if solved:
+                    log_ok("Cloudflare Turnstile solved! ✅")
+                    return True
+        except Exception as e:
+            log_debug(f"Turnstile direct click failed: {e}")
+
+        log_warn("Could not auto-solve Turnstile — it may need manual intervention")
+        return False
+
+    except Exception as e:
+        log_debug(f"Turnstile detection error: {e}")
+        return True
+
+
+async def _check_turnstile_solved(page) -> bool:
+    """Check if Cloudflare Turnstile challenge has been solved."""
+    try:
+        # Check for the success callback — Turnstile sets a hidden input
+        # with the token when solved
+        solved = await page.evaluate("""() => {
+            // Method 1: Check for cf-turnstile-response input (has value when solved)
+            const response = document.querySelector(
+                'input[name="cf-turnstile-response"], [name="cf-turnstile-response"]'
+            );
+            if (response && response.value && response.value.length > 10) return true;
+
+            // Method 2: Check iframe for success indicator
+            const iframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]');
+            for (const iframe of iframes) {
+                // If iframe is hidden or very small, challenge is done
+                const rect = iframe.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return true;
+            }
+
+            // Method 3: Check for Turnstile container data attributes
+            const containers = document.querySelectorAll('[class*="turnstile"], [id*="turnstile"]');
+            for (const c of containers) {
+                if (c.dataset && c.dataset.response) return true;
+            }
+
+            return false;
+        }""")
+        return bool(solved)
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN REGISTRATION FLOW
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -328,140 +497,289 @@ async def register_and_verify(
         # Pause after typing (like reviewing)
         await human_think("reading")
 
-        # Click "Send code" — try multiple methods
-        log("   Clicking 'Send code'...")
-        send_code_clicked = False
-        send_code_selectors = [
-            'button:has-text("Send code")',
-            'button:has-text("发送")',
-            'button:has-text("Send Code")',
-            '.auth-modal button[type="submit"]',
-            ".auth-modal .ant-btn-primary",
-        ]
-        for sel in send_code_selectors:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=2000):
-                    await btn.click(force=True)
-                    send_code_clicked = True
-                    log_debug(f"Send code clicked via: {sel}")
-                    break
-            except Exception:
-                continue
-
-        if not send_code_clicked:
-            log_debug("Send code button not found via selectors, trying JS click")
-            await page.evaluate("""() => {
-                const buttons = document.querySelectorAll('button');
-                for (const btn of buttons) {
-                    const t = btn.textContent.toLowerCase().trim();
-                    if (t.includes('send code') || t.includes('发送')) {
-                        btn.click();
-                        return true;
-                    }
-                }
-                // Try primary button in auth modal
-                const modal = document.querySelector('[class*="auth-modal"]');
-                if (modal) {
-                    const btn = modal.querySelector('button[type="submit"], .ant-btn-primary');
-                    if (btn) btn.click();
-                }
-                return false;
-            }""")
-
-        # Wait for response
-        await human_think("careful")
-
-        # Poll for either CAPTCHA or direct OTP/password modal (up to 15s)
-        # PatewayAI may show CAPTCHA puzzle before sending OTP, OR may skip
-        # CAPTCHA entirely and go straight to the registration modal.
+        # Click "Send code" — try multiple methods with retry
+        # PatewayAI uses Ant Design; button may be disabled until email is valid.
+        # Using force=True bypasses the disabled check and the React handler never fires.
+        send_code_max_retries = 3
         captcha_visible = False
         otp_modal_visible = False
-        captcha_poll_start = asyncio.get_running_loop().time()
-        captcha_poll_timeout = 15
 
-        while asyncio.get_running_loop().time() - captcha_poll_start < captcha_poll_timeout:
-            await asyncio.sleep(1)
+        # Monitor network for Send code API calls to diagnose failures
+        send_code_api_result = {"status": None, "body": None}
 
-            # Check for error messages after clicking "Send code"
+        async def _on_send_code_response(response):
             try:
-                error_text = await page.evaluate("""() => {
-                    const modal = document.querySelector('[class*="modal"], [class*="dialog"], form');
-                    const root = modal || document.body;
-                    const errorSelectors = [
-                        '.toast-error', '.alert-error', '.el-message--error',
-                        '[class*="error-msg"]', '[class*="errorMsg"]', '[class*="error-text"]',
-                    ];
-                    for (const sel of errorSelectors) {
-                        const el = root.querySelector(sel);
-                        if (el && el.offsetParent !== null && el.textContent.trim()) {
-                            return el.textContent.trim();
-                        }
-                    }
-                    return null;
-                }""")
-                if error_text:
-                    log_err(f"Send code failed: {error_text}")
-                    await page.screenshot(
-                        path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png")
-                    )
-                    return None
+                url = response.url
+                method = response.request.method
+                if method == "POST" and ("send" in url.lower() or "code" in url.lower() or "auth" in url.lower()):
+                    body_text = await response.text()
+                    send_code_api_result["status"] = response.status
+                    send_code_api_result["body"] = body_text[:500]
+                    log_debug(f"   Send code API: {method} {url[:100]} -> {response.status} ({len(body_text)}B)")
+                    if response.status >= 400:
+                        log_err(f"   Send code API error: HTTP {response.status}: {body_text[:200]}")
             except Exception:
                 pass
 
-            # Check if CAPTCHA appeared (means email was accepted, need to solve first)
-            try:
-                captcha_visible = await page.evaluate("""() => {
-                    const captchaSelectors = [
-                        '[class*="captcha"]', '[id*="captcha"]',
-                        '[class*="slider-puzzle"]', '[class*="geetest"]',
-                        '[class*="nc_wrapper"]', '[class*="verify-wrap"]',
-                        '[class*="slider-track"]', 'canvas',
-                    ];
-                    for (const sel of captchaSelectors) {
-                        const el = document.querySelector(sel);
-                        if (el && el.offsetParent !== null) {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 50 && rect.height > 30) return true;
+        page.on("response", _on_send_code_response)
+
+        for send_attempt in range(send_code_max_retries):
+            if send_attempt > 0:
+                log(f"   Retrying Send code (attempt {send_attempt + 1}/{send_code_max_retries})...")
+                # Re-fill email in case it was cleared
+                try:
+                    email_input = page.locator('input[type="email"], input[placeholder*="example"]').first
+                    await email_input.fill(email)
+                    await human_think("quick")
+                except Exception:
+                    pass
+
+            log("   Clicking 'Send code'...")
+            send_code_clicked = False
+            send_code_selectors = [
+                'button:has-text("Send code")',
+                'button:has-text("发送")',
+                'button:has-text("Send Code")',
+                '.auth-modal button[type="submit"]',
+                ".auth-modal .ant-btn-primary",
+            ]
+            for sel in send_code_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=2000):
+                        # Check if button is disabled before clicking
+                        is_disabled = await btn.is_disabled()
+                        if is_disabled:
+                            log_debug(f"Send code button disabled ({sel}), skipping")
+                            continue
+                        await btn.click(timeout=5000)
+                        send_code_clicked = True
+                        log_debug(f"Send code clicked via: {sel}")
+                        break
+                except Exception:
+                    continue
+
+            if not send_code_clicked:
+                log_debug("Send code button not found via selectors, trying JS click")
+                await page.evaluate("""() => {
+                    const buttons = document.querySelectorAll('button');
+                    for (const btn of buttons) {
+                        if (btn.disabled) continue;
+                        const t = btn.textContent.toLowerCase().trim();
+                        if (t.includes('send code') || t.includes('发送')) {
+                            btn.click();
+                            return true;
                         }
+                    }
+                    // Try primary button in auth modal
+                    const modal = document.querySelector('[class*="auth-modal"]');
+                    if (modal) {
+                        const btn = modal.querySelector('button[type="submit"], .ant-btn-primary');
+                        if (btn && !btn.disabled) btn.click();
                     }
                     return false;
                 }""")
-                if captcha_visible:
-                    log("   CAPTCHA detected — solving required before OTP is sent")
-                    break
-            except Exception:
-                pass
 
-            # Check if registration modal appeared directly (no CAPTCHA needed)
-            # PatewayAI sometimes skips CAPTCHA and goes straight to OTP/password fields
-            try:
-                otp_modal_visible = await page.evaluate("""() => {
-                    // Look for OTP input or password fields in a modal/form
-                    const modal = document.querySelector(
-                        '[class*="auth-modal"], [class*="modal"], [class*="dialog"], form'
-                    );
-                    if (!modal || modal.offsetParent === null) return false;
-                    // Check for OTP, password, or verification code inputs
-                    const otpInputs = modal.querySelectorAll(
-                        'input[placeholder*="code"], input[placeholder*="OTP"], ' +
-                        'input[placeholder*="验证"], input[maxlength="1"], ' +
-                        'input[type="password"]'
-                    );
-                    return otpInputs.length > 0;
-                }""")
-                if otp_modal_visible:
-                    log_ok("Registration modal detected directly (no CAPTCHA needed)")
-                    break
-            except Exception:
-                pass
+            # Wait for response
+            await human_think("careful")
 
+            # Poll for either CAPTCHA or direct OTP/password modal (up to 15s)
+            # PatewayAI may show CAPTCHA puzzle before sending OTP, OR may skip
+            # CAPTCHA entirely and go straight to the registration modal.
+            captcha_poll_start = asyncio.get_running_loop().time()
+            captcha_poll_timeout = 15
+            got_error_this_attempt = False
+
+            while asyncio.get_running_loop().time() - captcha_poll_start < captcha_poll_timeout:
+                await asyncio.sleep(1)
+
+                # Check for error messages after clicking "Send code"
+                # PatewayAI uses Ant Design — must check ant-message, ant-form-item-explain-error, etc.
+                try:
+                    error_text = await page.evaluate("""() => {
+                        const modal = document.querySelector(
+                            '[class*="modal"], [class*="dialog"], form, .auth-modal'
+                        );
+                        const root = modal || document.body;
+                        const errorSelectors = [
+                            // Ant Design error selectors (PatewayAI uses AntD)
+                            '.ant-message-error', '.ant-message-notice-error',
+                            '.ant-form-item-explain-error',
+                            '.ant-notification-notice-error',
+                            '.ant-alert-error',
+                            // Generic error selectors
+                            '.toast-error', '.alert-error', '.el-message--error',
+                            '[class*="error-msg"]', '[class*="errorMsg"]', '[class*="error-text"]',
+                            '[class*="ant-form-item"] [class*="error"]',
+                        ];
+                        for (const sel of errorSelectors) {
+                            const els = root.querySelectorAll(sel);
+                            for (const el of els) {
+                                if (el && el.offsetParent !== null && el.textContent.trim()) {
+                                    return el.textContent.trim();
+                                }
+                            }
+                        }
+                        // Also check document-level Ant Design message container
+                        const msgContainer = document.querySelector(
+                            '.ant-message, .ant-message-notice, .ant-notification'
+                        );
+                        if (msgContainer) {
+                            const errNotice = msgContainer.querySelector(
+                                '[class*="error"], .ant-message-error'
+                            );
+                            if (errNotice && errNotice.offsetParent !== null
+                                && errNotice.textContent.trim()) {
+                                return errNotice.textContent.trim();
+                            }
+                        }
+                        return null;
+                    }""")
+                    if error_text:
+                        log_err(f"Send code failed: {error_text}")
+                        await page.screenshot(
+                            path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png")
+                        )
+                        got_error_this_attempt = True
+                        break
+                except Exception:
+                    pass
+
+                # Check for text-based error messages (rate limit, already registered, etc.)
+                try:
+                    page_text_check = await page.evaluate(
+                        "() => document.body?.innerText?.substring(0, 1000) || ''"
+                    )
+                    text_lower = page_text_check.lower()
+                    text_errors = [
+                        ("rate limit", "Rate limited"),
+                        ("too many", "Too many requests"),
+                        ("already registered", "Email already registered"),
+                        ("already exists", "Account already exists"),
+                        ("频繁", "Too frequent (Chinese)"),
+                        ("已注册", "Already registered (Chinese)"),
+                    ]
+                    for keyword, label in text_errors:
+                        if keyword in text_lower:
+                            log_err(f"Send code failed: {label} detected in page text")
+                            await page.screenshot(
+                                path=str(config.SCREENSHOTS_DIR / f"send_code_error{suffix}.png")
+                            )
+                            got_error_this_attempt = True
+                            break
+                    if got_error_this_attempt:
+                        break
+                except Exception:
+                    pass
+
+                # Check if CAPTCHA appeared (means email was accepted, need to solve first)
+                try:
+                    captcha_visible = await page.evaluate("""() => {
+                        const captchaSelectors = [
+                            '[class*="captcha"]', '[id*="captcha"]',
+                            '[class*="slider-puzzle"]', '[class*="geetest"]',
+                            '[class*="nc_wrapper"]', '[class*="verify-wrap"]',
+                            '[class*="slider-track"]', 'canvas',
+                        ];
+                        for (const sel of captchaSelectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.offsetParent !== null) {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 50 && rect.height > 30) return true;
+                            }
+                        }
+                        return false;
+                    }""")
+                    if captcha_visible:
+                        log("   CAPTCHA detected — solving required before OTP is sent")
+                        break
+                except Exception:
+                    pass
+
+                # Check if registration modal appeared directly (no CAPTCHA needed)
+                # PatewayAI sometimes skips CAPTCHA and goes straight to OTP/password fields
+                try:
+                    otp_modal_visible = await page.evaluate("""() => {
+                        // Look for OTP input or password fields in a modal/form
+                        const modal = document.querySelector(
+                            '[class*="auth-modal"], [class*="modal"], [class*="dialog"], form'
+                        );
+                        if (!modal || modal.offsetParent === null) return false;
+                        // Check for OTP, password, or verification code inputs
+                        const otpInputs = modal.querySelectorAll(
+                            'input[placeholder*="code"], input[placeholder*="OTP"], ' +
+                            'input[placeholder*="验证"], input[maxlength="1"], ' +
+                            'input[type="password"]'
+                        );
+                        return otpInputs.length > 0;
+                    }""")
+                    if otp_modal_visible:
+                        log_ok("Registration modal detected directly (no CAPTCHA needed)")
+                        # Handle Turnstile that may appear with the registration modal
+                        await _handle_cloudflare_turnstile(page)
+                        break
+                except Exception:
+                    pass
+
+                # Check if Cloudflare Turnstile appeared (treat as a form of CAPTCHA)
+                try:
+                    has_turnstile = await page.evaluate("""() => {
+                        const iframes = document.querySelectorAll(
+                            'iframe[src*="challenges.cloudflare.com"]'
+                        );
+                        for (const iframe of iframes) {
+                            if (iframe.offsetParent !== null) return true;
+                        }
+                        return false;
+                    }""")
+                    if has_turnstile:
+                        log("   Cloudflare Turnstile detected — handling before OTP")
+                        turnstile_solved = await _handle_cloudflare_turnstile(page)
+                        if turnstile_solved:
+                            # After solving Turnstile, registration modal should appear
+                            otp_modal_visible = True
+                            break
+                except Exception:
+                    pass
+
+            # End of inner poll loop for this attempt
+
+            # If we got an error or found captcha/otp, decide whether to retry
+            if got_error_this_attempt:
+                if send_attempt < send_code_max_retries - 1:
+                    log_warn("Send code errored — will retry after short delay")
+                    await asyncio.sleep(3)
+                    continue
+                else:
+                    try:
+                        page.remove_listener("response", _on_send_code_response)
+                    except Exception:
+                        pass
+                    return None
+
+            if captcha_visible or otp_modal_visible:
+                break  # Success — exit retry loop
+
+        # Clean up the send code network listener
+        try:
+            page.remove_listener("response", _on_send_code_response)
+        except Exception:
+            pass
+
+        # After all retries, check if we got anything
         if not captcha_visible and not otp_modal_visible:
             page_text = await page.evaluate(
                 "() => document.body?.innerText?.substring(0, 500) || ''"
             )
             log_err("No CAPTCHA or registration modal appeared after Send code.")
             log_debug(f"Page text: {page_text[:300]}")
+            if send_code_api_result["status"]:
+                log_debug(
+                    f"   Last Send code API: HTTP {send_code_api_result['status']}, "
+                    f"body: {send_code_api_result['body']}"
+                )
+            else:
+                log_debug("   No Send code API call detected — button click may not have triggered")
             await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"no_captcha{suffix}.png"))
             return None
 
@@ -469,6 +787,11 @@ async def register_and_verify(
         if captcha_visible:
             log_step(4, 7, "Solving slider CAPTCHA...")
             await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"before_captcha{suffix}.png"))
+
+            # Handle Cloudflare Turnstile that may appear alongside slider CAPTCHA
+            turnstile_ok = await _handle_cloudflare_turnstile(page)
+            if not turnstile_ok:
+                log_warn("Turnstile may need manual solving — continuing anyway")
 
             if manual_captcha:
                 captcha_ok = await manual_solver.solve(page)
@@ -641,6 +964,14 @@ async def register_and_verify(
             )
             return None
 
+        # Handle Cloudflare Turnstile that may appear near the Sign up button
+        # PatewayAI sometimes shows a Turnstile checkbox below the form fields
+        await human_think("normal")
+        turnstile_ok = await _handle_cloudflare_turnstile(page)
+        if not turnstile_ok:
+            log_warn("Turnstile may need manual solve — attempting Sign up anyway")
+            await asyncio.sleep(3)
+
         # Scroll down naturally
         await human_scroll(page, "down", random.randint(100, 300))
         await human_think("normal")
@@ -713,6 +1044,14 @@ async def register_and_verify(
         # Wait for response — also surface any toast/error the UI shows
         await human_think("careful")
         await asyncio.sleep(random.uniform(2, 4))
+
+        # Handle Cloudflare Turnstile that may appear after clicking Sign up
+        # PatewayAI sometimes requires Turnstile verification on form submit
+        turnstile_ok = await _handle_cloudflare_turnstile(page)
+        if not turnstile_ok:
+            log_warn("Turnstile appeared after Sign up — may need manual solve")
+            await asyncio.sleep(5)
+
         try:
             toasts = await page.evaluate(
                 """() => {
@@ -824,6 +1163,9 @@ async def register_and_verify(
 
         await human_think("normal")
 
+        # Handle Cloudflare challenge that may appear on page navigation
+        await _handle_cloudflare_turnstile(page)
+
         # ═══ STEP 7: Create 2 API keys (Default + Economy) ═══
         # Between keys, make sure no lingering modal blocks the next create.
         async def _close_any_modal():
@@ -885,6 +1227,13 @@ async def _select_service_mode(page, service_mode: str) -> None:
     target = "Default Mode" if service_mode == "default" else "Economy"
     log(f"   Selecting Service Mode: {target}")
     try:
+        # Dump modal structure first so we can debug selectors
+        try:
+            modal_html = await page.locator('.ant-modal-body').inner_html()
+            log_debug(f"   Modal HTML (first 500): {modal_html[:500]}")
+        except Exception as exc:
+            log_debug(f"   Could not dump modal HTML: {exc}")
+
         # Find the radio input whose label/aria-label contains the target text
         js = """
         (target) => {
