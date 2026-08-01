@@ -226,6 +226,7 @@ async def register_and_verify(
     slider_solver = SliderSolver(max_attempts=config.MAX_CAPTCHA_ATTEMPTS)
     manual_solver = ManualSolver(timeout=config.CAPTCHA_TIMEOUT)
     suffix = f"_{acct_num}" if acct_num else ""
+    referral_code = None  # set inside "Account created" modal handling
 
     try:
         # ═══ STEP 1: Navigate to PatewayAI ═══
@@ -729,6 +730,22 @@ async def register_and_verify(
                 log_ok("Account created modal detected!")
                 # Wait for modal animation to complete
                 await asyncio.sleep(2)
+
+                # Extract referral code from the success modal before dismissing
+                # Modal shows: "https://pateway.ai/?aff=95WQ2B6S" with a copy button
+                try:
+                    referral_code = await page.evaluate(
+                        """() => {
+                            const text = document.body ? document.body.innerText : '';
+                            const m = text.match(/aff=([A-Za-z0-9]+)/);
+                            return m ? m[1] : null;
+                        }"""
+                    )
+                    if referral_code:
+                        log(f"   Referral code: {referral_code}")
+                except Exception as exc:  # noqa: BLE001
+                    log_debug(f"Referral code extraction failed: {exc}")
+
                 try:
                     # Click "Get started" button in the success modal
                     # From actual UI: <button>Get started</button> inside the modal
@@ -792,6 +809,7 @@ async def register_and_verify(
             return {
                 "default": key_default,
                 "economy": key_economy,
+                "referral_code": referral_code,
             }
         else:
             log_err("Failed to capture any API key")

@@ -169,6 +169,7 @@ async def run_one(
     # Save credentials
     key_default = api_keys.get("default")
     key_economy = api_keys.get("economy")
+    referral_code = api_keys.get("referral_code")
     save_creds(
         {
             "email": email,
@@ -178,6 +179,7 @@ async def run_one(
             "api_key_economy": key_economy,
             # Backward-compat alias: legacy readers use api_key
             "api_key": key_default or key_economy,
+            "referral_code": referral_code,
             "base_url": config.PATEWAY_API_URL,
             "status": "success",
         }
@@ -187,11 +189,14 @@ async def run_one(
         log_ok(f"🎉 {email} → Default: {mask_value(key_default)}")
     if key_economy:
         log_ok(f"🎉 {email} → Economy: {mask_value(key_economy)}")
+    if referral_code:
+        log_ok(f"🎉 {email} → Referral code: {referral_code}")
     return {
         "email": email,
         "password": ident["password"],
         "api_key_default": key_default,
         "api_key_economy": key_economy,
+        "referral_code": referral_code,
     }
 
 
@@ -361,12 +366,14 @@ async def main_async(args: argparse.Namespace) -> None:
         import io
 
         if valid_results:
-            keys = list(valid_results[0].keys())
+            first = valid_results[0]
+            keys = list(first.keys()) if isinstance(first, dict) else []
             buf = io.StringIO()
             writer = csv.writer(buf)
             writer.writerow(keys)
             for r in valid_results:
-                writer.writerow([str(r.get(k, "")) for k in keys])
+                if isinstance(r, dict):
+                    writer.writerow([str(r.get(k, "")) for k in keys])
             print(buf.getvalue(), end="")
 
     # Cleanup screenshots on success
