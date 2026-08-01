@@ -1097,41 +1097,56 @@ async def create_api_key(
         # Click "Create" button in modal
         log("   Clicking 'Create'...")
         try:
-            # Ant Design: buttons inside .ant-modal-footer or .ant-modal-body
-            create_btn = None
+            # Click 'Create' while simultaneously waiting for the create-key POST
+            # to fire. The listener MUST be armed BEFORE we click so we don't miss it.
             create_selectors = [
                 '.ant-modal-footer button:has-text("Create"):not(:has-text("Key"))',
                 '.ant-modal-body button:has-text("Create"):not(:has-text("Key"))',
                 ".ant-modal button.ant-btn-primary",
                 'button:has-text("Create"):not(:has-text("Key")):not(:has-text("Create Key"))',
             ]
-            for sel in create_selectors:
-                try:
-                    el = page.locator(sel).last
-                    if await el.is_visible(timeout=2000):
-                        create_btn = el
-                        log_debug(f"Found Create button: {sel}")
-                        break
-                except Exception:
-                    continue
 
-            if create_btn:
-                # Use JS click instead of human_click — the button may be overlapped
-                # by modal elements, and we need to trigger React's onClick handler
-                await create_btn.click(force=True)
-            else:
-                log_warn("Create button not found, trying JS click...")
-                await page.evaluate("""() => {
-                    const modals = document.querySelectorAll('.ant-modal-body, .ant-modal-footer');
-                    for (const modal of modals) {
-                        const btn = modal.querySelector('button.ant-btn-primary, button:last-child');
-                        if (btn && btn.textContent.trim().toLowerCase().includes('create')) {
-                            btn.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""")
+            async def arm_and_click():
+                async with page.expect_response(
+                    lambda r: r.request.method == "POST" and "key" in r.url.lower(),
+                    timeout=20000,
+                ) as resp_info:
+                    clicked = False
+                    for sel in create_selectors:
+                        try:
+                            el = page.locator(sel).last
+                            if await el.is_visible(timeout=2000):
+                                log_debug(f"Clicking Create via: {sel}")
+                                await el.click(force=True)
+                                clicked = True
+                                break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        log_warn("Create button not found by selectors; trying JS click")
+                        await page.evaluate("""() => {
+                            const modals = document.querySelectorAll('.ant-modal-body, .ant-modal-footer');
+                            for (const modal of modals) {
+                                const btn = modal.querySelector('button.ant-btn-primary, button:last-child');
+                                if (btn && btn.textContent.trim().toLowerCase().includes('create')) {
+                                    btn.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }""")
+                return await resp_info.value
+
+            response = await arm_and_click()
+            log(f"   POST {response.url[:120]} -> {response.status}")
+            body = await response.text()
+            log(f"   Body ({len(body)}B): {body[:300]!r}")
+            import re
+
+            match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body)
+            if match:
+                captured_key = match.group(0)
+                log_ok(f"API key intercepted from response: {mask_value(captured_key)}")
 
             await human_think("normal")
         except Exception as e:
@@ -1143,17 +1158,28 @@ async def create_api_key(
         await asyncio.sleep(random.uniform(3, 5))
 
         # Wait for key creation response — PRIMARY source of truth.
-        # The network-level listener will set captured_key if it sees the create response.
+        # page.expect_response catches the POST directly (more reliable than page.on).
         log("   Waiting for Key Created response...")
-        # Give the response handler up to 12s of polling
-        for _ in range(24):
-            if captured_key:
-                break
-            await asyncio.sleep(0.5)
+        try:
+            async with page.expect_response(
+                lambda r: r.request.method == "POST" and "key" in r.url.lower(),
+                timeout=15000,
+            ) as resp_info:
+                # Click 'Create' was just performed; we now await the response.
+                pass
+            response = await resp_info.value
+            body = await response.text()
+            log(f"   POST {response.url[:120]} -> {response.status}: {len(body)}B")
+            import re
 
-        if captured_key:
-            log_ok("Key creation response captured from network")
-        else:
+            match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body)
+            if match:
+                captured_key = match.group(0)
+                log_ok(f"API key intercepted from response: {mask_value(captured_key)}")
+        except Exception as exc:
+            log_debug(f"expect_response failed: {exc}")
+
+        if not captured_key:
             # Brief UI-modal look as fallback
             try:
                 await page.wait_for_selector(
