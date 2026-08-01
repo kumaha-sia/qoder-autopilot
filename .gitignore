@@ -77,3 +77,6 @@ proxies.txt
 
 # Supervised run artifacts
 runs/
+
+# Runtime logs
+pateway_run*.log
