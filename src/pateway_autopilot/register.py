@@ -933,8 +933,9 @@ async def create_api_key(
             body = await response.text()
             if not body or len(body) > 500_000:
                 return
-            if any(kw in url for kw in ["apikey", "api-key", "key", "keys"]):
-                log_debug(f"   NetResp {url[:120]}: {len(body)}B")
+            # Always log POST responses (potential key creation endpoint)
+            if response.request.method == "POST":
+                log_debug(f"   POST {url[:120]}: {len(body)}B :: {body[:300]!r}")
             import re
 
             match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body)
