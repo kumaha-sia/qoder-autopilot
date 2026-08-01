@@ -875,32 +875,71 @@ async def register_and_verify(
 
 
 async def _select_service_mode(page, service_mode: str) -> None:
-    """Click the Service Mode card in the Create Key modal.
+    """Select Service Mode in the Create Key modal via real DOM events.
 
-    PatewayAI's Create Key modal has two card-style options:
-    'Default Mode' and 'Economy'. We click the matching one. The
-    monthly-limit input is left at its default placeholder (Minimum 0.10)
-    to keep behavior consistent with existing runs.
+    Ant Design card-style radios ignore plain el.click() — the React handler
+    is attached to the <input type=radio> inside an <label>. We locate that
+    input by its label text and dispatch real mouse events on the input itself,
+    then React's onChange fires correctly.
     """
     target = "Default Mode" if service_mode == "default" else "Economy"
     log(f"   Selecting Service Mode: {target}")
     try:
-        result = await page.evaluate(
-            """(target) => {
-                const candidates = [...document.querySelectorAll(
-                    '.ant-modal button, .ant-modal [role=button], .ant-modal [class*=card], .ant-modal [class*=option], .ant-modal [class*=item]'
-                )].filter(el => el.offsetParent && (el.textContent||'').includes(target));
-                if (!candidates.length) return 'not-found';
-                candidates[0].click();
-                return 'clicked';
-            }""",
-            target,
-        )
-        log_debug(f"   service mode click: {result}")
-        if result != "clicked":
-            log_warn(f"Could not find Service Mode card '{target}', leaving default selection")
+        # Find the radio input whose label/aria-label contains the target text
+        js = """
+        (target) => {
+            // Look for radio inputs inside Create Key modal
+            const modal = document.querySelector('.ant-modal-body');
+            if (!modal) return 'no-modal';
+            const labels = [...modal.querySelectorAll('label')];
+            for (const label of labels) {
+                const text = (label.textContent || label.ariaLabel || '').toLowerCase();
+                if (text.includes(target.toLowerCase())) {
+                    const radio = label.querySelector('input[type=radio]');
+                    if (radio) {
+                        radio.click(dispatch=True, bubbles=true);
+                        return 'radio-clicked:' + radio.value;
+                    }
+                }
+            }
+            // Fallback: aria-label on input directly (e.g. AntD Checkbox wraps
+            // these cards as checkbox inputs)
+            const inputs = [...modal.querySelectorAll('input[type=radio], input[type=checkbox]')];
+            for (const inp of inputs) {
+                const al = (inp.ariaLabel || inp.title || '').toLowerCase();
+                if (al.includes(target.toLowerCase())) {
+                    inp.click(dispatch=True, bubbles=true);
+                    return 'input-clicked:' + inp.value;
+                }
+            }
+            // Last resort: click any element whose text contains the target
+            const any = [...modal.querySelectorAll('*')].find(el => {
+                const t = (el.textContent || el.ariaLabel || '').toLowerCase();
+                return t.includes(target.toLowerCase()) && el.offsetParent;
+            });
+            if (any) {
+                any.click(dispatch=True, bubbles=true);
+                return 'any-clicked:' + (any.tagName + '/' + (any.textContent||'').trim().slice(0,20));
+            }
+            return 'not-found';
+        }
+        """
+        result = await page.evaluate(js, target)
+        log(f"   service mode click: {result}")
         await asyncio.sleep(random.uniform(0.4, 0.9))
-    except Exception as exc:  # noqa: BLE001
+
+        # Verify the selection stuck — read back what's checked
+        verify = await page.evaluate("""
+            () => {
+                const modal = document.querySelector('.ant-modal-body');
+                if (!modal) return 'no-modal';
+                const checked = modal.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked');
+                const results = [...checked].map(c => c.value || c.ariaLabel || c.id);
+                return results.length ? results.join('|') : 'none';
+            }
+        """)
+        log(f"   service mode verify: {verify}")
+    except Exception as exc:
         log_warn(f"Service mode selection failed ({target}): {exc}")
 
 
@@ -1292,32 +1331,53 @@ async def create_api_key(
 
 
 async def _extract_key_from_ui(page) -> str | None:
-    """Extract API key from the 'Key Created' modal."""
+    """Extract API key from the 'Key Created' modal.
+
+    Pestival modal shows the key prominently in some <code>/<pre>/font-mono
+    element inside `.ant-modal-body` — text search via :has-text for sk-ptw-
+    fails because the ellipsis-matched text content is split into nested spans.
+    We do a full body-text grep scoped to the modal instead.
+    """
     try:
         import re
 
-        elements = await page.query_selector_all("text=/sk-ptw-/")
+        # Strategy A: elements with monospace/code styling inside the modal
+        elements = await page.query_selector_all(
+            ".ant-modal-body code, .ant-modal-body pre, "
+            ".ant-modal-body .font-mono, .ant-modal-body [class*='code'], "
+            ".ant-modal-body [class*='key-value'], .ant-modal-body input[readonly]"
+        )
         for element in elements:
             text = await element.text_content()
-            match = re.search(r"sk-ptw-[a-zA-Z0-9]+", text)
-            if match:
-                return match.group(0)
+            if text:
+                match = re.search(r"sk-ptw-[a-zA-Z0-9]+", text)
+                if match:
+                    key = match.group(0)
+                    log_debug(f"   Key from UI modal element: {key[:8]}...{key[-4:]}")
+                    return key
 
-        code_elements = await page.query_selector_all("code, pre")
-        for element in code_elements:
-            text = await element.text_content()
-            match = re.search(r"sk-ptw-[a-zA-Z0-9]+", text)
-            if match:
-                return match.group(0)
-
-        all_text = await page.evaluate("""() => {
-            const elements = document.querySelectorAll('[class*="key"], [class*="code"], [class*="value"]');
-            return Array.from(elements).map(el => el.textContent).join('\\n');
+        # Strategy B: any direct body-text search inside the modal
+        body_text = await page.evaluate("""() => {
+            const modal = document.querySelector('.ant-modal-body');
+            return modal ? modal.innerText : '';
         }""")
-        match = re.search(r"sk-ptw-[a-zA-Z0-9]+", all_text)
-        if match:
-            return match.group(0)
+        if body_text:
+            match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body_text)
+            if match:
+                key = match.group(0)
+                log_debug(f"   Key from UI modal body-text: {key[:8]}...{key[-4:]}")
+                return key
 
+        # Strategy C: anti-design Select-all input value (readonly)
+        all_inputs = await page.query_selector_all(".ant-modal-body input[type='text']")
+        for inp in all_inputs:
+            val = await inp.input_value()
+            if val:
+                match = re.search(r"sk-ptw-[a-zA-Z0-9]+", val)
+                if match:
+                    key = match.group(0)
+                    log_debug(f"   Key from UI modal input: {key[:8]}...{key[-4:]}")
+                    return key
     except Exception as e:
         log_debug(f"UI extraction failed: {e}")
 
