@@ -6,8 +6,25 @@ Launches Camoufox anti-detect browser with Playwright.
 """
 
 from contextlib import asynccontextmanager
+from urllib.parse import unquote, urlparse
 
 from ..utils.logger import log, log_debug
+
+
+def _parse_proxy_url(proxy_url: str) -> dict:
+    """Convert a proxy URL string to the dict format Camoufox expects.
+
+    "socks5://user:pass@host:port" → {"server": "socks5://host:port", "username": "user", "password": "pass"}
+    "http://host:port"             → {"server": "http://host:port"}
+    """
+    parsed = urlparse(proxy_url)
+    server = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    result: dict = {"server": server}
+    if parsed.username:
+        result["username"] = unquote(parsed.username)
+    if parsed.password:
+        result["password"] = unquote(parsed.password)
+    return result
 
 
 @asynccontextmanager
@@ -37,10 +54,16 @@ async def launch_browser(
 
     log("🦊 Launching Camoufox browser...")
 
+    # Camoufox/Playwright expect proxy as a dict, not a URL string.
+    # Convert "socks5://user:pass@host:port" → {"server": ..., "username": ..., "password": ...}
+    proxy_dict: dict | None = None
+    if proxy:
+        proxy_dict = _parse_proxy_url(proxy)
+
     async with AsyncCamoufox(
         headless=headless,
         geoip=True,
-        proxy=proxy,
+        proxy=proxy_dict,
     ) as browser:
         log_debug(f"Browser launched (headless={headless}, proxy={proxy})")
         yield browser
