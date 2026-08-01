@@ -926,16 +926,13 @@ async def create_api_key(
         nonlocal captured_key
         try:
             url = response.url
-            # Skip huge/binary endpoints quickly
-            ct = response.headers.get("content-type", "")
-            if "json" not in ct and "javascript" not in ct and "text" not in ct:
+            # Only care about POST / PUT (mutations); static scripts are huge
+            if response.request.method not in ("POST", "PUT"):
                 return
             body = await response.text()
             if not body or len(body) > 500_000:
                 return
-            # Always log POST responses (potential key creation endpoint)
-            if response.request.method == "POST":
-                log(f"   POST {url[:120]}: {len(body)}B :: {body[:300]!r}")
+            log(f"   POST {url[:120]}: {len(body)}B :: {body[:200]!r}")
             import re
 
             match = re.search(r"sk-ptw-[a-zA-Z0-9]+", body)
@@ -1145,20 +1142,31 @@ async def create_api_key(
         await human_think("careful")
         await asyncio.sleep(random.uniform(3, 5))
 
-        # Wait for "Key Created" modal to appear
-        # From actual PatewayAI UI: modal with "Key Created" title, green check icon,
-        # and API key displayed as "sk-ptw-..."
-        log("   Waiting for Key Created modal...")
-        try:
-            # Wait for the key created modal text to appear
-            await page.wait_for_selector('text="Key Created", text="key created"', timeout=10000)
-            log_ok("Key Created modal detected")
-            await human_think("reading")
-        except Exception:
-            log_warn("Key Created modal not detected, trying broader search...")
+        # Wait for key creation response — PRIMARY source of truth.
+        # The network-level listener will set captured_key if it sees the create response.
+        log("   Waiting for Key Created response...")
+        # Give the response handler up to 12s of polling
+        for _ in range(24):
+            if captured_key:
+                break
+            await asyncio.sleep(0.5)
+
+        if captured_key:
+            log_ok("Key creation response captured from network")
+        else:
+            # Brief UI-modal look as fallback
+            try:
+                await page.wait_for_selector(
+                    '.ant-modal:has-text("Key Created"), .ant-modal:has-text("key created")',
+                    timeout=5000,
+                )
+                log_ok("Key Created modal detected (UI)")
+            except Exception:
+                log_warn("Key Created modal not detected in UI either")
+
             # Broader: check if API key text is visible on page
             try:
-                await page.wait_for_selector("text=/sk-ptw-/", timeout=5000)
+                await page.wait_for_selector("text=/sk-ptw-/", timeout=3000)
                 log_ok("API key text found on page")
             except Exception:
                 log_warn("No API key text found on page")
