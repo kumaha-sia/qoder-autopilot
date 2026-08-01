@@ -15,24 +15,24 @@ import random
 import signal
 import sys
 
-from .auth.credentials import save_creds, mask_value
+from .auth.credentials import mask_value, save_creds
 from .auth.identity import gen_identity
 from .browser.camoufox import launch_browser, setup_page
 from .infra import config
-from .infra.proxies import load_proxies, ProxyRotator
+from .infra.proxies import ProxyRotator, load_proxies
 from .infra.temp_mail import TempMailClient
 from .register import register_and_verify
 from .utils.logger import (
+    close_log_file,
     log,
-    log_ok,
-    log_err,
-    log_warn,
-    log_debug,
     log_banner,
-    set_verbosity,
+    log_debug,
+    log_err,
+    log_ok,
+    log_warn,
     set_account_tag,
     set_log_file,
-    close_log_file,
+    set_verbosity,
 )
 
 
@@ -82,16 +82,18 @@ async def run_one(
         # If Gmail with app password → use IMAP for auto OTP
         if "gmail.com" in effective_email.lower() or "googlemail.com" in effective_email.lower():
             from .infra.email_gen import GmailAliasGenerator
+
             gen = GmailAliasGenerator(effective_email, method="combined", prefix="reg")
             email = gen.get(acct_num) if acct_num > 0 else gen.next()
             log_ok(f"Gmail alias: {email}")
 
             if effective_password:
                 from .infra.gmail_imap import GmailImapClient
+
                 try:
                     temp_mail = GmailImapClient(effective_email, effective_password)
                     await temp_mail.create()
-                    log_ok(f"Gmail IMAP connected — OTP will be auto-read")
+                    log_ok("Gmail IMAP connected — OTP will be auto-read")
                 except Exception as e:
                     log_warn(f"Gmail IMAP failed: {e} — will use manual OTP")
                     temp_mail = None
@@ -197,11 +199,31 @@ async def main_async(args: argparse.Namespace) -> None:
         # Windows: set up KeyboardInterrupt handler via signal.signal
         def _win_signal_handler(sig, frame):
             _handle_signal()
+
         signal.signal(signal.SIGINT, _win_signal_handler)
 
     headless = args.headless
     manual_captcha = args.manual_captcha
     parallel = args.parallel
+
+    # Supervised mode: spawn file-driven browser worker and return.
+    # Operator then drives it via `pateway-autopilot supervised <cmd>`.
+    if getattr(args, "supervised", False):
+        from .supervised.worker import run_supervised_async
+
+        log("=" * 60)
+        log("👁️  SUPERVISED MODE — manual browser control")
+        log("=" * 60)
+        log("Browser will launch and wait for commands sent via:")
+        log("  pateway-autopilot supervised <cmd> [key=value ...]")
+        log("Examples:")
+        log("  pateway-autopilot supervised goto url=https://pateway.ai/")
+        log("  pateway-autopilot supervised click selector=button:has-text('Get Started')")
+        log("  pateway-autopilot supervised fill selector=input[type=email] text=x@y.com")
+        log("  pateway-autopilot supervised shot name=my_step")
+        log("  pateway-autopilot supervised close")
+        await run_supervised_async(headless=False)
+        return
 
     # Apply verbosity (mutually exclusive: verbose takes precedence, warn if both)
     if args.verbose and args.quiet:
@@ -247,7 +269,9 @@ async def main_async(args: argparse.Namespace) -> None:
         log(f"  Manual captcha: {manual_captcha}")
         log(f"  Parallel: {parallel}")
         log(f"  Mail provider: {config.MAIL_PROVIDER}")
-        log(f"  Proxy: {proxy or ('rotation (' + str(proxy_rotator.count) + ' proxies)' if proxy_rotator else 'none')}")
+        log(
+            f"  Proxy: {proxy or ('rotation (' + str(proxy_rotator.count) + ' proxies)' if proxy_rotator else 'none')}"
+        )
         log(f"  Tempik URL: {config.TEMPIK_URL}")
         log(f"  PatewayAI URL: {config.PATEWAY_URL}")
         return
@@ -262,7 +286,9 @@ async def main_async(args: argparse.Namespace) -> None:
     if parallel and args.count > 1:
         # PARALLEL MODE
         if manual_captcha:
-            log_warn("⚠️ Parallel + manual captcha with count >1: multiple browser windows will pause simultaneously")
+            log_warn(
+                "⚠️ Parallel + manual captcha with count >1: multiple browser windows will pause simultaneously"
+            )
             log_warn("   Consider using auto captcha or reducing count for manual mode")
         log(f"⚡ Parallel mode: launching {args.count} browser windows")
 
@@ -320,6 +346,7 @@ async def main_async(args: argparse.Namespace) -> None:
     elif output_format == "csv":
         import csv
         import io
+
         if valid_results:
             keys = list(valid_results[0].keys())
             buf = io.StringIO()
@@ -335,10 +362,15 @@ async def main_async(args: argparse.Namespace) -> None:
 
         if config.SCREENSHOTS_DIR.exists():
             # Only delete if ALL accounts succeeded (no failure/error/no_captcha screenshots)
-            fail_patterns = ["*fail*", "*error*", "*no_captcha*", "*send_code_error*", "*otp_timeout*"]
+            fail_patterns = [
+                "*fail*",
+                "*error*",
+                "*no_captcha*",
+                "*send_code_error*",
+                "*otp_timeout*",
+            ]
             has_failure_screenshots = any(
-                config.SCREENSHOTS_DIR.glob(pattern)
-                for pattern in fail_patterns
+                config.SCREENSHOTS_DIR.glob(pattern) for pattern in fail_patterns
             )
             if not has_failure_screenshots:
                 shutil.rmtree(config.SCREENSHOTS_DIR, ignore_errors=True)
@@ -361,6 +393,11 @@ def main() -> None:
         if sub == "config":
             _handle_config_command(sys.argv[2:])
             return
+
+        if sub == "supervised":
+            from .supervised.cli import cli as supervised_cli
+
+            sys.exit(supervised_cli(sys.argv[2:]))
 
     # Main registration arguments
     p = argparse.ArgumentParser(
@@ -401,10 +438,20 @@ def main() -> None:
         help="Pause for manual CAPTCHA solving (forces non-headless)",
     )
     p.add_argument(
+        "--supervised",
+        action="store_true",
+        help=(
+            "Start a supervised browser session (visible) instead of auto-register. "
+            "Drives via 'pateway-autopilot supervised <cmd>'; all steps logged + "
+            "screenshot under runs/<id>/supervised/."
+        ),
+    )
+    p.add_argument(
         "--parallel",
         action="store_true",
         help="Run all accounts concurrently",
     )
+
     def _valid_delay(val: str) -> int:
         n = int(val)
         if n < 1:
@@ -491,9 +538,9 @@ def _handle_config_command(argv: list[str]) -> None:
     """Handle 'pateway-autopilot config' subcommands."""
     from .infra.config import (
         USER_CONFIG_FILE,
+        delete_user_config,
         load_user_config,
         set_user_config_value,
-        delete_user_config,
     )
 
     if not argv or argv[0] in ("-h", "--help"):
@@ -531,15 +578,25 @@ def _handle_config_command(argv: list[str]) -> None:
         print(f"{'Setting':<25} {'Value':<50} {'Source':<10}")
         print("─" * 85)
         for key in [
-            "gmail_email", "gmail_app_password", "mail_provider",
-            "otp_timeout", "captcha_timeout", "parallel_delay", "key_name", "invite_code",
+            "gmail_email",
+            "gmail_app_password",
+            "mail_provider",
+            "otp_timeout",
+            "captcha_timeout",
+            "parallel_delay",
+            "key_name",
+            "invite_code",
         ]:
             cli = key.replace("_", "-")
             current = getattr(settings, key, None)
             source = "config" if key in cfg else "default"
             val_str = str(current) if current else "(empty)"
             # Mask sensitive fields
-            if any(s in key for s in ("invite", "password", "app_password")) and val_str and val_str != "(empty)":
+            if (
+                any(s in key for s in ("invite", "password", "app_password"))
+                and val_str
+                and val_str != "(empty)"
+            ):
                 val_str = val_str[:4] + "••••" if len(val_str) > 4 else "***"
             print(f"  {cli:<23} {val_str:<50} {source}")
         print()
@@ -568,7 +625,7 @@ def _handle_config_command(argv: list[str]) -> None:
             print(f"Available: {', '.join(key_map.keys())}")
             sys.exit(1)
         key, expected_type = key_entry
-        if expected_type == int:
+        if expected_type is int:
             try:
                 int(value)
             except ValueError:

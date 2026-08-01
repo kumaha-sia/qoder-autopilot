@@ -74,3 +74,6 @@ _archive/
 pateway_accounts.json
 
 proxies.txt
+
+# Supervised run artifacts
+runs/
