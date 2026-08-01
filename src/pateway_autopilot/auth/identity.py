@@ -8,32 +8,75 @@ Uses Faker with id_ID locale.
 
 import secrets
 import string
-from typing import Optional
 
 try:
     from faker import Faker
 
-    fake = Faker("id_ID")
+    fake: Faker | None = Faker("id_ID")
 except ImportError:
     fake = None
 
 
 # Fallback name pools
 FIRST_NAMES = [
-    "Raihan", "Ahmad", "Budi", "Dimas", "Eko",
-    "Fajar", "Gilang", "Hadi", "Irfan", "Joko",
-    "Kevin", "Lukman", "Muhammad", "Naufal", "Omar",
-    "Putra", "Rizky", "Satria", "Taufik", "Umar",
-    "Vino", "Wahyu", "Yusuf", "Zaki", "Andi",
-    "Bayu", "Cahya", "Dani", "Elang", "Faris",
+    "Raihan",
+    "Ahmad",
+    "Budi",
+    "Dimas",
+    "Eko",
+    "Fajar",
+    "Gilang",
+    "Hadi",
+    "Irfan",
+    "Joko",
+    "Kevin",
+    "Lukman",
+    "Muhammad",
+    "Naufal",
+    "Omar",
+    "Putra",
+    "Rizky",
+    "Satria",
+    "Taufik",
+    "Umar",
+    "Vino",
+    "Wahyu",
+    "Yusuf",
+    "Zaki",
+    "Andi",
+    "Bayu",
+    "Cahya",
+    "Dani",
+    "Elang",
+    "Faris",
 ]
 
 LAST_NAMES = [
-    "Pratama", "Saputra", "Wijaya", "Kurniawan", "Hidayat",
-    "Nugraha", "Santoso", "Wibowo", "Permadi", "Ramadhan",
-    "Setiawan", "Utama", "Firmansyah", "Gunawan", "Hakim",
-    "Ibrahim", "Jaya", "Kusuma", "Lesmana", "Mulyadi",
-    "Nurhadi", "Prasetyo", "Rahman", "Siregar", "Sinaga",
+    "Pratama",
+    "Saputra",
+    "Wijaya",
+    "Kurniawan",
+    "Hidayat",
+    "Nugraha",
+    "Santoso",
+    "Wibowo",
+    "Permadi",
+    "Ramadhan",
+    "Setiawan",
+    "Utama",
+    "Firmansyah",
+    "Gunawan",
+    "Hakim",
+    "Ibrahim",
+    "Jaya",
+    "Kusuma",
+    "Lesmana",
+    "Mulyadi",
+    "Nurhadi",
+    "Prasetyo",
+    "Rahman",
+    "Siregar",
+    "Sinaga",
 ]
 
 

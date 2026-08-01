@@ -23,9 +23,8 @@ import imaplib
 import re
 import time
 from email.header import decode_header
-from typing import Optional
 
-from ..utils.logger import log, log_ok, log_err, log_warn, log_debug
+from ..utils.logger import log, log_debug, log_err, log_ok
 
 
 class GmailImapClient:
@@ -45,7 +44,7 @@ class GmailImapClient:
         self.email_address = email_address
         # Remove spaces from app password (Google shows it with spaces)
         self.app_password = app_password.replace(" ", "")
-        self._conn: Optional[imaplib.IMAP4_SSL] = None
+        self._conn: imaplib.IMAP4_SSL | None = None
         self.address = email_address  # Compatible with TempMailClient interface
         self._baseline_ids: set = set()  # IDs of emails before we start waiting
 
@@ -77,7 +76,9 @@ class GmailImapClient:
         # Record baseline: all existing message IDs so we skip old emails
         baseline_msgs = await self.get_messages()
         self._baseline_ids = {m.get("id", "") for m in baseline_msgs}
-        log_ok(f"Gmail IMAP: connected to {self.email_address} ({len(self._baseline_ids)} existing emails)")
+        log_ok(
+            f"Gmail IMAP: connected to {self.email_address} ({len(self._baseline_ids)} existing emails)"
+        )
         return self.email_address
 
     async def get_messages(self) -> list[dict]:
@@ -96,10 +97,13 @@ class GmailImapClient:
             conn.select("INBOX")
 
             import datetime
+
             today = datetime.datetime.now().strftime("%d-%b-%Y")
 
-            # Use UID search for persistent message IDs
-            status, data = conn.uid('search', None, f'(SINCE {today})')
+            # Use UID search for persistent message IDs.  charset=None is
+            # accepted by Gmail at runtime; the imaplib type stubs incorrectly
+            # require str, so we suppress the type check.
+            status, data = conn.uid("search", None, f"(SINCE {today})")  # type: ignore[arg-type]
             if status != "OK":
                 return []
 
@@ -110,7 +114,7 @@ class GmailImapClient:
             messages = []
             for uid in reversed(uid_list):  # Newest first
                 try:
-                    status, msg_data = conn.uid('fetch', uid, "(RFC822)")
+                    status, msg_data = conn.uid("fetch", uid, "(RFC822)")
                     if status != "OK":
                         continue
 
@@ -124,14 +128,16 @@ class GmailImapClient:
                     # Use Message-ID header as stable unique identifier
                     message_id = msg.get("Message-ID", uid.decode())
 
-                    messages.append({
-                        "id": message_id,
-                        "uid": uid.decode(),
-                        "from_address": from_addr,
-                        "subject": subject,
-                        "body": body,
-                        "received_at": msg.get("Date", ""),
-                    })
+                    messages.append(
+                        {
+                            "id": message_id,
+                            "uid": uid.decode(),
+                            "from_address": from_addr,
+                            "subject": subject,
+                            "body": body,
+                            "received_at": msg.get("Date", ""),
+                        }
+                    )
                 except Exception:
                     continue
 
@@ -206,7 +212,9 @@ class GmailImapClient:
         text = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
         # Replace <br>, <div>, <p>, <tr>, <td> with newlines for readability
-        text = re.sub(r"<br\s*/?>|</?(?:div|p|tr|td|h[1-6]|li|table)[^>]*>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"<br\s*/?>|</?(?:div|p|tr|td|h[1-6]|li|table)[^>]*>", "\n", text, flags=re.IGNORECASE
+        )
         # Strip remaining HTML tags
         text = re.sub(r"<[^>]+>", " ", text)
         # Collapse whitespace but preserve newlines
@@ -220,7 +228,7 @@ class GmailImapClient:
         timeout: int = 120,
         poll_interval: float = 3.0,
         otp_pattern: str = r"\b(\d{6})\b",
-    ) -> Optional[str]:
+    ) -> str | None:
         """Poll Gmail inbox until OTP email arrives.
 
         Only checks emails that arrived AFTER create() was called
@@ -253,14 +261,16 @@ class GmailImapClient:
         # Chinese: 验证码 (verification code) followed by 6 digits
         pat_cn_code = re.compile(r"验证码\D{0,50}(\d{6})")
         # Also match the CSS class pattern: otp-code">NNNNNN</div> (raw HTML fallback)
-        pat_otp_class = re.compile(r'otp-code[^>]*>\s*(\d{6})', re.IGNORECASE)
+        pat_otp_class = re.compile(r"otp-code[^>]*>\s*(\d{6})", re.IGNORECASE)
         # Sender/subject filters — only process emails that look like PatewayAI OTP
         pat_sender = re.compile(r"pateway", re.IGNORECASE)
         pat_subject = re.compile(r"验证码|verification|verify|otp|code", re.IGNORECASE)
         check_count = 0
         seen_ids = set()
 
-        log(f"   📧 Monitoring Gmail for new OTP email (ignoring {len(self._baseline_ids)} old emails)...")
+        log(
+            f"   📧 Monitoring Gmail for new OTP email (ignoring {len(self._baseline_ids)} old emails)..."
+        )
 
         while time.time() - start < timeout:
             check_count += 1
@@ -285,11 +295,11 @@ class GmailImapClient:
 
                     # ── Filter: only process emails that look like PatewayAI OTP ──
                     # Accept if sender contains "pateway" OR subject contains OTP keywords
-                    is_otp_email = bool(
-                        pat_sender.search(from_addr) or pat_subject.search(subject)
-                    )
+                    is_otp_email = bool(pat_sender.search(from_addr) or pat_subject.search(subject))
                     if not is_otp_email:
-                        log_debug(f"Skipping non-OTP email: from={from_addr[:40]}, subject={subject[:60]}")
+                        log_debug(
+                            f"Skipping non-OTP email: from={from_addr[:40]}, subject={subject[:60]}"
+                        )
                         seen_ids.add(msg_id)
                         continue
 
@@ -301,7 +311,9 @@ class GmailImapClient:
                         match = pat_verify_code.search(text)
                         if match:
                             elapsed = int(time.time() - start)
-                            log_ok(f"OTP found via VERIFICATION CODE pattern after {elapsed}s: {match.group(1)}")
+                            log_ok(
+                                f"OTP found via VERIFICATION CODE pattern after {elapsed}s: {match.group(1)}"
+                            )
                             return match.group(1)
 
                     # Strategy 1b: HTML class "otp-code" (raw HTML may survive in non-multipart)
@@ -311,7 +323,9 @@ class GmailImapClient:
                         match = pat_otp_class.search(text)
                         if match:
                             elapsed = int(time.time() - start)
-                            log_ok(f"OTP found via otp-code class pattern after {elapsed}s: {match.group(1)}")
+                            log_ok(
+                                f"OTP found via otp-code class pattern after {elapsed}s: {match.group(1)}"
+                            )
                             return match.group(1)
 
                     # Strategy 2: Chinese 验证码 followed by 6 digits
@@ -321,7 +335,9 @@ class GmailImapClient:
                         match = pat_cn_code.search(text)
                         if match:
                             elapsed = int(time.time() - start)
-                            log_ok(f"OTP found via 验证码 pattern after {elapsed}s: {match.group(1)}")
+                            log_ok(
+                                f"OTP found via 验证码 pattern after {elapsed}s: {match.group(1)}"
+                            )
                             return match.group(1)
 
                     # Strategy 3: Generic 6-digit fallback (only on confirmed OTP emails)
@@ -342,7 +358,9 @@ class GmailImapClient:
                 if check_count % 5 == 0:
                     elapsed = int(time.time() - start)
                     new_count = len(messages) - len(self._baseline_ids)
-                    log_debug(f"OTP check #{check_count} ({elapsed}s): {new_count} new emails, no OTP yet")
+                    log_debug(
+                        f"OTP check #{check_count} ({elapsed}s): {new_count} new emails, no OTP yet"
+                    )
 
             except Exception as e:
                 log_debug(f"Gmail OTP poll error: {e}")

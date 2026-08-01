@@ -7,8 +7,8 @@ macOS only — no-op on other platforms.
 """
 
 import asyncio
-import platform
 import math
+import platform
 
 
 def get_screen_size() -> tuple[int, int]:
@@ -25,6 +25,7 @@ def get_screen_size() -> tuple[int, int]:
             )
             # Parse resolution from output
             import re
+
             for line in result.stdout.split("\n"):
                 if "Resolution:" in line:
                     match = re.search(r"(\d+)\s*x\s*(\d+)", line)
@@ -97,7 +98,10 @@ def tile_all_camoufox_windows():
         result = subprocess.run(["osascript", "-e", str(script)], capture_output=True, timeout=15)
         if result.returncode != 0 and result.stderr:
             from ..utils.logger import log_warn
-            log_warn(f"Window tiling failed: {result.stderr.decode('utf-8', errors='replace')[:200]}")
+
+            log_warn(
+                f"Window tiling failed: {result.stderr.decode('utf-8', errors='replace')[:200]}"
+            )
 
     except Exception:
         pass
@@ -113,8 +117,9 @@ async def tile_all_camoufox_windows_async():
 
         # Calculate dynamic grid based on window count
         import subprocess
+
         # Get window count first
-        count_script = '''
+        count_script = """
         tell application "System Events"
             set total to 0
             repeat with proc in (every process whose name contains "camoufox")
@@ -122,8 +127,10 @@ async def tile_all_camoufox_windows_async():
             end repeat
             return total
         end tell
-        '''
-        result = subprocess.run(["osascript", "-e", count_script], capture_output=True, text=True, timeout=10)
+        """
+        result = subprocess.run(
+            ["osascript", "-e", count_script], capture_output=True, text=True, timeout=10
+        )
         win_count = 1
         if result.returncode == 0 and result.stdout.strip().isdigit():
             win_count = int(result.stdout.strip())
@@ -158,7 +165,10 @@ async def tile_all_camoufox_windows_async():
         result = subprocess.run(["osascript", "-e", str(script)], capture_output=True, timeout=15)
         if result.returncode != 0 and result.stderr:
             from ..utils.logger import log_warn
-            log_warn(f"Window tiling failed: {result.stderr.decode('utf-8', errors='replace')[:200]}")
+
+            log_warn(
+                f"Window tiling failed: {result.stderr.decode('utf-8', errors='replace')[:200]}"
+            )
 
     except Exception:
         pass

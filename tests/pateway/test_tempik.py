@@ -2,8 +2,9 @@
 Tests for Pateway Autopilot — Tempik Client
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
 
 from pateway_autopilot.infra.tempik import TempikClient
 

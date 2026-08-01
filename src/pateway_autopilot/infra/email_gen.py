@@ -15,7 +15,6 @@ This allows unlimited unique email addresses from ONE Gmail account.
 
 import random
 import string
-from typing import Optional
 
 
 def generate_dot_variations(local_part: str, count: int = 10) -> list[str]:
@@ -27,19 +26,22 @@ def generate_dot_variations(local_part: str, count: int = 10) -> list[str]:
 
     Returns:
         List of local parts with dots inserted at random positions.
+        The original (no-dots) is NOT included — callers that want it
+        should add it themselves.
 
     Example:
-        "johndoe" → ["johndoe", "john.doe", "j.ohndoe", "jo.hndoe", ...]
+        "johndoe" → ["john.doe", "j.ohndoe", "jo.hndoe", ...]
     """
-    variations = set()
+    variations: set[str] = set()
     chars = list(local_part)
 
-    # Always include the original (no dots)
-    variations.add(local_part)
+    # For short local parts there may not be enough unique dot positions;
+    # cap the requested count to the maximum possible unique variants.
+    max_possible = 2 ** (len(chars) - 1) - 1  # 2^(n-1) - 1 dot placements
+    target = min(count, max(1, max_possible))
 
-    while len(variations) < count:
-        # Pick random positions to insert dots
-        # Dots can be between any two characters (not at start/end)
+    while len(variations) < target:
+        # Pick random positions to insert dots (1 to min(len-1, 5) dots)
         num_dots = random.randint(1, min(len(chars) - 1, 5))
         positions = sorted(random.sample(range(1, len(chars)), num_dots))
 
@@ -49,13 +51,15 @@ def generate_dot_variations(local_part: str, count: int = 10) -> list[str]:
             variant.insert(pos, ".")
 
         result = "".join(variant)
-        if result not in variations:
+        if result != local_part and result not in variations:
             variations.add(result)
 
-    return list(variations)[:count]
+    return list(variations)[:target]
 
 
-def generate_plus_variations(local_part: str, count: int = 10, prefix: str = "pateway") -> list[str]:
+def generate_plus_variations(
+    local_part: str, count: int = 10, prefix: str = "pateway"
+) -> list[str]:
     """Generate plus-addressing variations.
 
     Args:
@@ -80,7 +84,9 @@ def generate_plus_variations(local_part: str, count: int = 10, prefix: str = "pa
     return variations
 
 
-def generate_combined_variations(local_part: str, count: int = 10, prefix: str = "pateway") -> list[str]:
+def generate_combined_variations(
+    local_part: str, count: int = 10, prefix: str = "pateway"
+) -> list[str]:
     """Generate combined dot + plus variations for maximum uniqueness.
 
     Args:
@@ -98,7 +104,7 @@ def generate_combined_variations(local_part: str, count: int = 10, prefix: str =
             "j.ohn.doe+pateway3c9z",
         ]
     """
-    variations = set()
+    variations: set[str] = set()
 
     while len(variations) < count:
         # Random dot variation
@@ -164,7 +170,7 @@ class GmailAliasGenerator:
         self.local_part, self.domain = base_email.split("@", 1)
         self.method = method
         self.prefix = prefix
-        self._used = set()
+        self._used: set[str] = set()
         self._counter = 0
 
     def next(self) -> str:

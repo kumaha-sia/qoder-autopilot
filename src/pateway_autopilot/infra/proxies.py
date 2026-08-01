@@ -9,12 +9,11 @@ Converts to: socks5://username:password@host:port
 import itertools
 import random
 from pathlib import Path
-from typing import Optional
 
-from ..utils.logger import log, log_warn, log_debug
+from ..utils.logger import log, log_warn
 
 
-def parse_proxy_line(line: str) -> Optional[str]:
+def parse_proxy_line(line: str) -> str | None:
     """Parse a proxy line in host:port:user:pass format.
 
     Args:
@@ -59,8 +58,8 @@ def load_proxies(filepath: str) -> list[str]:
         return []
 
     proxies = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
+    with open(path, encoding="utf-8") as f:
+        for line in f:
             proxy = parse_proxy_line(line)
             if proxy:
                 proxies.append(proxy)
@@ -94,7 +93,7 @@ class ProxyRotator:
         """Number of proxies available."""
         return len(self._proxies)
 
-    def next(self) -> Optional[str]:
+    def next(self) -> str | None:
         """Get next proxy in rotation.
 
         Returns:
@@ -104,7 +103,7 @@ class ProxyRotator:
             return None
         return next(self._cycle)
 
-    def peek(self, index: int = 0) -> Optional[str]:
+    def peek(self, index: int = 0) -> str | None:
         """Peek at proxy at given index (0-based).
 
         Args:
@@ -117,7 +116,7 @@ class ProxyRotator:
             return None
         return self._proxies[index % len(self._proxies)]
 
-    def get_for_account(self, account_num: int) -> Optional[str]:
+    def get_for_account(self, account_num: int) -> str | None:
         """Get proxy for a specific account number (1-based).
 
         Args:

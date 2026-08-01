@@ -19,15 +19,15 @@ async def main():
     """Register a single account."""
     try:
         result = await run_one(
-            headless=False,       # Show browser window
-            use_oauth=True,       # Connect to 9Router
+            headless=False,  # Show browser window
+            use_oauth=True,  # Connect to 9Router
             manual_captcha=True,  # Pause for manual captcha
         )
 
         if result:
-            print(f"\n✅ Success!")
+            print("\n✅ Success!")
             print(f"   Email: {result['email']}")
-            if 'token' in result:
+            if "token" in result:
                 print(f"   Token: {result['token'][:30]}...")
         else:
             print("\n❌ Registration failed")

@@ -12,10 +12,9 @@ import stat
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, cast
 
-from ..utils.logger import log, log_ok, log_err
-
+from ..utils.logger import log_err, log_ok
 
 # Thread-safe file lock for parallel mode
 # In asyncio context, all coroutines run in the same thread so threading.Lock
@@ -32,14 +31,18 @@ def _get_lock():
 
             _file_lock = threading.Lock()
         except ImportError:
-            _file_lock = type("NullLock", (), {
-                "__enter__": lambda self: self,
-                "__exit__": lambda self, *args: None,
-            })()
+            _file_lock = type(
+                "NullLock",
+                (),
+                {
+                    "__enter__": lambda self: self,
+                    "__exit__": lambda self, *args: None,
+                },
+            )()
     return _file_lock
 
 
-def save_creds(creds: dict, filepath: Optional[Path] = None) -> bool:
+def save_creds(creds: dict, filepath: Path | None = None) -> bool:
     """Save credentials to JSON file.
 
     Args:
@@ -52,6 +55,7 @@ def save_creds(creds: dict, filepath: Optional[Path] = None) -> bool:
     """
     if filepath is None:
         from ..infra.config import CREDENTIALS_FILE
+
         filepath = CREDENTIALS_FILE
 
     lock = _get_lock()
@@ -80,11 +84,18 @@ def save_creds(creds: dict, filepath: Optional[Path] = None) -> bool:
             if sys.platform == "win32":
                 try:
                     import subprocess
+
                     # Set owner-only ACL via icacls (removes inherited, grants current user Full only)
                     subprocess.run(
-                        ["icacls", str(tmp_path), "/inheritance:r",
-                         "/grant:r", f"{os.environ.get('USERNAME', os.getlogin())}:(F)"],
-                        capture_output=True, check=False,
+                        [
+                            "icacls",
+                            str(tmp_path),
+                            "/inheritance:r",
+                            "/grant:r",
+                            f"{os.environ.get('USERNAME', os.getlogin())}:(F)",
+                        ],
+                        capture_output=True,
+                        check=False,
                     )
                 except Exception:
                     pass
@@ -102,7 +113,7 @@ def save_creds(creds: dict, filepath: Optional[Path] = None) -> bool:
             return False
 
 
-def load_creds(filepath: Optional[Path] = None) -> list[dict]:
+def load_creds(filepath: Path | None = None) -> list[dict]:
     """Load credentials from JSON file.
 
     Args:
@@ -113,12 +124,13 @@ def load_creds(filepath: Optional[Path] = None) -> list[dict]:
     """
     if filepath is None:
         from ..infra.config import CREDENTIALS_FILE
+
         filepath = CREDENTIALS_FILE
 
     try:
         if filepath.exists():
             with open(filepath) as f:
-                return json.load(f)
+                return cast(list[dict[Any, Any]], json.load(f))
     except Exception as e:
         log_err(f"Failed to load credentials: {e}")
 

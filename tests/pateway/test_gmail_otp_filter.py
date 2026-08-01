@@ -5,10 +5,9 @@ were incorrectly extracted as OTP.
 """
 
 import asyncio
-import re
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
@@ -88,7 +87,12 @@ def test_baseline_emails_ignored():
 
 def test_non_otp_email_with_pateway_sender():
     """Email from PatewayAI but without OTP keywords in subject — should still try body."""
-    msg = _make_msg("m1", "noreply@pateway.ai", "Welcome to PatewayAI", "Your code is 998877. Valid for 10 minutes.")
+    msg = _make_msg(
+        "m1",
+        "noreply@pateway.ai",
+        "Welcome to PatewayAI",
+        "Your code is 998877. Valid for 10 minutes.",
+    )
     otp = asyncio.run(_run_otp_test([msg]))
     assert otp == "998877", f"Should extract 998877 from PatewayAI email, got {otp}"
 
@@ -187,7 +191,9 @@ def test_real_pateway_sender_filter():
     """Verify 'contact@mail.pateway.ai' sender matches the pateway filter."""
     msg = _make_msg("m1", "contact@mail.pateway.ai", "ACCOUNT", "VERIFICATION CODE\n640065")
     otp = asyncio.run(_run_otp_test([msg]))
-    assert otp == "640065", f"Sender 'contact@mail.pateway.ai' should match pateway filter, got {otp}"
+    assert otp == "640065", (
+        f"Sender 'contact@mail.pateway.ai' should match pateway filter, got {otp}"
+    )
 
 
 if __name__ == "__main__":
@@ -218,6 +224,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  💥 {t.__name__}: {type(e).__name__}: {e}")
             failed += 1
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Results: {passed} passed, {failed} failed, {len(tests)} total")
     sys.exit(1 if failed else 0)

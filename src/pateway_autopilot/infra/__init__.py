@@ -2,7 +2,7 @@
 Infrastructure module — Temp mail, config, etc.
 """
 
-from .tempik import TempikClient
 from .config import settings
+from .tempik import TempikClient
 
 __all__ = ["TempikClient", "settings"]

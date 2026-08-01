@@ -9,11 +9,14 @@ Usage:
     python -m pateway_autopilot -n 3 --headless
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import random
 import signal
 import sys
+from typing import TYPE_CHECKING
 
 from .auth.credentials import mask_value, save_creds
 from .auth.identity import gen_identity
@@ -22,6 +25,9 @@ from .infra import config
 from .infra.proxies import ProxyRotator, load_proxies
 from .infra.temp_mail import TempMailClient
 from .register import register_and_verify
+
+if TYPE_CHECKING:
+    from .infra.gmail_imap import GmailImapClient
 from .utils.logger import (
     close_log_file,
     log,
@@ -73,7 +79,9 @@ async def run_one(
     log("=" * 60)
 
     # 1. Generate email
-    temp_mail = None
+    # Holds either a GmailImapClient (when Gmail+app-password is configured)
+    # or a TempMailClient (multi-provider fallback) or None (manual OTP).
+    temp_mail: TempMailClient | GmailImapClient | None = None
     # Use config values as defaults, CLI args as overrides
     effective_email = user_email or config.GMAIL_EMAIL
     effective_password = gmail_password or config.GMAIL_APP_PASSWORD
@@ -83,7 +91,7 @@ async def run_one(
         if "gmail.com" in effective_email.lower() or "googlemail.com" in effective_email.lower():
             from .infra.email_gen import GmailAliasGenerator
 
-            gen = GmailAliasGenerator(effective_email, method="combined", prefix="reg")
+            gen = GmailAliasGenerator(effective_email, method="dot", prefix="reg")
             email = gen.get(acct_num) if acct_num > 0 else gen.next()
             log_ok(f"Gmail alias: {email}")
 
@@ -197,6 +205,20 @@ async def run_one(
             "status": "success",
         }
     )
+
+    # Push keys to 9Router if requested (after keys are saved).
+    push_9router = getattr(run_one, "_push_9router", False)
+    if push_9router and (key_default or key_economy):
+        log("📤 Pushing API keys to 9Router...")
+        from .infra.ninerouter import push_keys_to_9router
+
+        push_results = await push_keys_to_9router(email, key_default, key_economy)
+        push_ok = sum(1 for v in push_results.values() if v)
+        push_total = len(push_results)
+        if push_ok == push_total and push_total > 0:
+            log_ok(f"9Router: {push_ok}/{push_total} keys pushed ✅")
+        elif push_total > 0:
+            log_warn(f"9Router: only {push_ok}/{push_total} keys pushed")
 
     if key_default:
         log_ok(f"🎉 {email} → Default: {mask_value(key_default)}")
@@ -314,6 +336,18 @@ async def main_async(args: argparse.Namespace) -> None:
         f"headless={headless} | manual_captcha={manual_captcha} | parallel={parallel} | {proxy_info}"
     )
 
+    # ── Chain referral + push 9Router flags ────────────────────────────
+    chain_referral = getattr(args, "chain_referral", False)
+    push_9router = getattr(args, "push_9router", False)
+
+    # Set push flag on run_one so it auto-pushes after key creation.
+    run_one._push_9router = push_9router  # type: ignore[attr-defined]
+
+    if chain_referral and args.count > 1:
+        log("🔗 Chain referral enabled — each account uses previous account's referral code")
+    if push_9router:
+        log("📤 9Router push enabled — keys will be pushed after each account")
+
     if parallel and args.count > 1:
         # PARALLEL MODE
         if manual_captcha:
@@ -327,16 +361,24 @@ async def main_async(args: argparse.Namespace) -> None:
             if i > 0:
                 await asyncio.sleep(i * 2)
             acct_proxy = proxy_rotator.get_for_account(i + 1) if proxy_rotator else None
+            # Chain referral: use previous account's referral code.
+            acct_invite = invite_code
+            if chain_referral and i > 0 and results_so_far:
+                prev = results_so_far[-1]
+                if isinstance(prev, dict) and prev.get("referral_code"):
+                    acct_invite = str(prev["referral_code"])
+                    log(f"   🔗 Account {i + 1} using referral from account {i}: {acct_invite}")
             return await run_one(
                 headless=headless,
                 manual_captcha=manual_captcha,
                 acct_num=i + 1,
                 proxy=acct_proxy,
-                invite_code=invite_code,
+                invite_code=acct_invite,
                 user_email=user_email,
                 mail_provider=mail_provider,
             )
 
+        results_so_far: list[dict | None] = []
         tasks = [staggered_run(i) for i in range(args.count)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -350,12 +392,21 @@ async def main_async(args: argparse.Namespace) -> None:
         for i in range(args.count):
             acct_proxy = proxy_rotator.get_for_account(i + 1) if proxy_rotator else None
             log(f"\n{'─' * 60}\n📦 Account {i + 1}/{args.count}\n{'─' * 60}")
+
+            # Chain referral: account N>1 uses referral code from account N-1.
+            acct_invite = invite_code
+            if chain_referral and i > 0 and results:
+                prev = results[-1]
+                if isinstance(prev, dict) and prev.get("referral_code"):
+                    acct_invite = str(prev["referral_code"])
+                    log(f"   🔗 Using referral code from account {i}: {acct_invite}")
+
             r = await run_one(
                 headless=headless,
                 manual_captcha=manual_captcha,
                 acct_num=i + 1 if args.count > 1 else 0,
                 proxy=acct_proxy,
-                invite_code=invite_code,
+                invite_code=acct_invite,
                 user_email=user_email,
                 mail_provider=mail_provider,
             )
@@ -561,6 +612,18 @@ def main() -> None:
         default=None,
         metavar="PATH",
         help="Write logs to file",
+    )
+    p.add_argument(
+        "--push-9router",
+        action="store_true",
+        dest="push_9router",
+        help="Push API keys to 9Router after each account is created",
+    )
+    p.add_argument(
+        "--chain-referral",
+        action="store_true",
+        dest="chain_referral",
+        help="Use each account's referral code as the invite code for the next account",
     )
     args = p.parse_args()
 

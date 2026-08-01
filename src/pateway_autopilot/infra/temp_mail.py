@@ -17,16 +17,16 @@ Usage:
 import asyncio
 import re
 import time
-from typing import Optional
+from typing import Any, cast
 
 import httpx
 
-from ..utils.logger import log, log_ok, log_err, log_warn, log_debug
-
+from ..utils.logger import log_debug, log_err, log_ok, log_warn
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROVIDER: mail.tm
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class MailTmClient:
     """mail.tm temp mail client."""
@@ -34,10 +34,10 @@ class MailTmClient:
     BASE_URL = "https://api.mail.tm"
 
     def __init__(self):
-        self._client: Optional[httpx.AsyncClient] = None
-        self._token: Optional[str] = None
-        self.address: Optional[str] = None
-        self._password: Optional[str] = None
+        self._client: httpx.AsyncClient | None = None
+        self._token: str | None = None
+        self.address: str | None = None
+        self._password: str | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -74,17 +74,23 @@ class MailTmClient:
         self._password = "".join(random.choices(string.ascii_letters + string.digits + "!@#", k=16))
 
         # Create account
-        resp = await client.post(f"{self.BASE_URL}/accounts", json={
-            "address": self.address,
-            "password": self._password,
-        })
+        resp = await client.post(
+            f"{self.BASE_URL}/accounts",
+            json={
+                "address": self.address,
+                "password": self._password,
+            },
+        )
         resp.raise_for_status()
 
         # Get auth token
-        resp = await client.post(f"{self.BASE_URL}/token", json={
-            "address": self.address,
-            "password": self._password,
-        })
+        resp = await client.post(
+            f"{self.BASE_URL}/token",
+            json={
+                "address": self.address,
+                "password": self._password,
+            },
+        )
         resp.raise_for_status()
         self._token = resp.json()["token"]
 
@@ -105,13 +111,15 @@ class MailTmClient:
 
         result = []
         for msg in messages:
-            result.append({
-                "id": msg.get("id", ""),
-                "from_address": msg.get("from", {}).get("address", ""),
-                "subject": msg.get("subject", ""),
-                "body": msg.get("text", "") or msg.get("intro", ""),
-                "received_at": msg.get("createdAt", ""),
-            })
+            result.append(
+                {
+                    "id": msg.get("id", ""),
+                    "from_address": msg.get("from", {}).get("address", ""),
+                    "subject": msg.get("subject", ""),
+                    "body": msg.get("text", "") or msg.get("intro", ""),
+                    "received_at": msg.get("createdAt", ""),
+                }
+            )
         return result
 
 
@@ -119,14 +127,15 @@ class MailTmClient:
 # PROVIDER: 1secmail.com
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class OneSecMailClient:
     """1secmail.com temp mail client."""
 
     BASE_URL = "https://www.1secmail.com/api/v1"
 
     def __init__(self):
-        self._client: Optional[httpx.AsyncClient] = None
-        self.address: Optional[str] = None
+        self._client: httpx.AsyncClient | None = None
+        self.address: str | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -169,7 +178,9 @@ class OneSecMailClient:
 
         client = await self._get_client()
         local, domain = self.address.split("@")
-        resp = await client.get(f"{self.BASE_URL}/?action=getMessages&login={local}&domain={domain}")
+        resp = await client.get(
+            f"{self.BASE_URL}/?action=getMessages&login={local}&domain={domain}"
+        )
         resp.raise_for_status()
         messages = resp.json()
 
@@ -186,13 +197,15 @@ class OneSecMailClient:
             except Exception:
                 body = msg.get("body", "")
 
-            result.append({
-                "id": str(msg.get("id", "")),
-                "from_address": msg.get("from", ""),
-                "subject": msg.get("subject", ""),
-                "body": body,
-                "received_at": msg.get("date", ""),
-            })
+            result.append(
+                {
+                    "id": str(msg.get("id", "")),
+                    "from_address": msg.get("from", ""),
+                    "subject": msg.get("subject", ""),
+                    "body": body,
+                    "received_at": msg.get("date", ""),
+                }
+            )
         return result
 
 
@@ -200,15 +213,16 @@ class OneSecMailClient:
 # PROVIDER: Guerrilla Mail
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class GuerrillaMailClient:
     """Guerrilla Mail temp mail client."""
 
     BASE_URL = "https://api.guerrillamail.com/ajax.php"
 
     def __init__(self):
-        self._client: Optional[httpx.AsyncClient] = None
-        self._sid: Optional[str] = None
-        self.address: Optional[str] = None
+        self._client: httpx.AsyncClient | None = None
+        self._sid: str | None = None
+        self.address: str | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -224,9 +238,7 @@ class GuerrillaMailClient:
         client = await self._get_client()
 
         # Get email address from Guerrilla Mail
-        resp = await client.get(
-            f"{self.BASE_URL}?f=get_email_address&ip=127.0.0.1&agent=Mozilla"
-        )
+        resp = await client.get(f"{self.BASE_URL}?f=get_email_address&ip=127.0.0.1&agent=Mozilla")
         resp.raise_for_status()
         data = resp.json()
 
@@ -242,9 +254,7 @@ class GuerrillaMailClient:
             return []
 
         client = await self._get_client()
-        resp = await client.get(
-            f"{self.BASE_URL}?f=check_email&seq=0&sid_token={self._sid}"
-        )
+        resp = await client.get(f"{self.BASE_URL}?f=check_email&seq=0&sid_token={self._sid}")
         resp.raise_for_status()
         data = resp.json()
         messages = data.get("list", [])
@@ -254,15 +264,18 @@ class GuerrillaMailClient:
             body = msg.get("mail_body", "") or msg.get("mail_excerpt", "")
             # Strip HTML
             import re
+
             body = re.sub(r"<[^>]+>", " ", body).strip()
 
-            result.append({
-                "id": str(msg.get("mail_id", "")),
-                "from_address": msg.get("mail_from", ""),
-                "subject": msg.get("mail_subject", ""),
-                "body": body,
-                "received_at": str(msg.get("mail_date", "")),
-            })
+            result.append(
+                {
+                    "id": str(msg.get("mail_id", "")),
+                    "from_address": msg.get("mail_from", ""),
+                    "subject": msg.get("mail_subject", ""),
+                    "body": body,
+                    "received_at": str(msg.get("mail_date", "")),
+                }
+            )
         return result
 
 
@@ -270,14 +283,15 @@ class GuerrillaMailClient:
 # PROVIDER: Tempik (webkarya.net) — original
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TempikClient:
     """Tempik temp mail client (webkarya.net)."""
 
     def __init__(self, base_url: str = "https://tempik.webkarya.net/api"):
         self.base_url = base_url.rstrip("/")
-        self._client: Optional[httpx.AsyncClient] = None
-        self.session_id: Optional[str] = None
-        self.address: Optional[str] = None
+        self._client: httpx.AsyncClient | None = None
+        self.session_id: str | None = None
+        self.address: str | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -314,10 +328,11 @@ class TempikClient:
         client = await self._get_client()
         headers = {"x-session-id": self.session_id}
         from urllib.parse import quote
+
         encoded = quote(self.address, safe="")
         resp = await client.get(f"{self.base_url}/inboxes/{encoded}/messages", headers=headers)
         resp.raise_for_status()
-        return resp.json()
+        return cast(list[dict[Any, Any]], resp.json())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -330,7 +345,7 @@ PROVIDER_ORDER = ["mail.tm", "tempmail.lol", "guerrilla", "1secmail", "tempik"]
 class TempMailClient:
     """Multi-provider temp mail client with automatic fallback."""
 
-    def __init__(self, preferred_provider: Optional[str] = None):
+    def __init__(self, preferred_provider: str | None = None):
         """Initialize with optional preferred provider.
 
         Args:
@@ -338,9 +353,9 @@ class TempMailClient:
                               If None, tries in default order.
         """
         self._preferred = preferred_provider
-        self._active_client = None
-        self._active_provider = None
-        self.address: Optional[str] = None
+        self._active_client: Any = None
+        self._active_provider: str | None = None
+        self.address: str | None = None
 
     def _get_provider_order(self) -> list[str]:
         """Get provider try order."""
@@ -380,26 +395,28 @@ class TempMailClient:
                 self._active_provider = provider
                 self.address = address
                 log_ok(f"Temp email ({provider}): {address}")
-                return address
+                return cast(str, address)
             except Exception as e:
                 errors.append(f"{provider}: {e}")
                 log_warn(f"Provider {provider} failed: {e}")
                 continue
 
-        raise RuntimeError(f"All temp mail providers failed:\n" + "\n".join(f"  - {e}" for e in errors))
+        raise RuntimeError(
+            "All temp mail providers failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        )
 
     async def get_messages(self) -> list[dict]:
         """Get messages from active provider."""
         if not self._active_client:
             return []
-        return await self._active_client.get_messages()
+        return cast(list[dict[Any, Any]], await self._active_client.get_messages())
 
     async def wait_for_otp(
         self,
         timeout: int = 120,
         poll_interval: float = 2.0,
         otp_pattern: str = r"\b(\d{6})\b",
-    ) -> Optional[str]:
+    ) -> str | None:
         """Poll inbox until OTP email arrives.
 
         Args:
@@ -429,12 +446,16 @@ class TempMailClient:
                         match = pattern.search(text)
                         if match:
                             elapsed = int(time.time() - start)
-                            log_ok(f"OTP found after {elapsed}s ({check_count} checks): {match.group(1)}")
+                            log_ok(
+                                f"OTP found after {elapsed}s ({check_count} checks): {match.group(1)}"
+                            )
                             return match.group(1)
 
                 if check_count % 10 == 0:
                     elapsed = int(time.time() - start)
-                    log_debug(f"OTP check #{check_count} ({elapsed}s): {len(messages)} messages, no OTP yet")
+                    log_debug(
+                        f"OTP check #{check_count} ({elapsed}s): {len(messages)} messages, no OTP yet"
+                    )
 
             except Exception as e:
                 log_debug(f"OTP poll error (will retry): {e}")
@@ -453,6 +474,6 @@ class TempMailClient:
                 pass
 
     @property
-    def provider(self) -> Optional[str]:
+    def provider(self) -> str | None:
         """Name of active provider."""
         return self._active_provider

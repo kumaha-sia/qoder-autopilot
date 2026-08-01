@@ -12,7 +12,7 @@ Docs: https://github.com/kumaha-sia/tempik
 import asyncio
 import re
 import time
-from typing import Optional
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -23,8 +23,8 @@ class TempikClient:
 
     def __init__(self, base_url: str = "https://tempik.webkarya.net/api"):
         self.base_url = base_url.rstrip("/")
-        self.session_id: Optional[str] = None
-        self._client: Optional[httpx.AsyncClient] = None
+        self.session_id: str | None = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create async HTTP client."""
@@ -42,17 +42,18 @@ class TempikClient:
         client = await self._get_client()
         resp = await client.get(f"{self.base_url}/session")
         resp.raise_for_status()
-        data = resp.json()
-        self.session_id = data["sessionId"]
+        data = cast(dict[str, Any], resp.json())
+        self.session_id = str(data["sessionId"])
         return self.session_id
 
     async def _ensure_session(self) -> str:
         """Ensure session exists, create if needed."""
         if not self.session_id:
             await self.create_session()
-        return self.session_id
+        # create_session() sets self.session_id; cast to satisfy mypy.
+        return cast(str, self.session_id)
 
-    async def create_inbox(self, local_part: Optional[str] = None) -> str:
+    async def create_inbox(self, local_part: str | None = None) -> str:
         """Create temp email address.
 
         Args:
@@ -76,8 +77,8 @@ class TempikClient:
             json=body,
         )
         resp.raise_for_status()
-        data = resp.json()
-        return data["address"]
+        data = cast(dict[str, Any], resp.json())
+        return str(data["address"])
 
     async def get_messages(self, address: str) -> list[dict]:
         """Get all messages for an inbox.
@@ -105,7 +106,7 @@ class TempikClient:
             headers=headers,
         )
         resp.raise_for_status()
-        return resp.json()
+        return cast(list[dict[Any, Any]], resp.json())
 
     async def delete_inbox(self, address: str) -> bool:
         """Remove inbox from session (does not delete from DB).
@@ -127,7 +128,7 @@ class TempikClient:
             headers=headers,
         )
         resp.raise_for_status()
-        return resp.json().get("ok", False)
+        return bool(cast(dict[str, Any], resp.json()).get("ok", False))
 
     async def get_config(self) -> dict:
         """Get Tempik app configuration.
@@ -138,7 +139,7 @@ class TempikClient:
         client = await self._get_client()
         resp = await client.get(f"{self.base_url}/config")
         resp.raise_for_status()
-        return resp.json()
+        return cast(dict[Any, Any], resp.json())
 
     async def wait_for_otp(
         self,
@@ -146,7 +147,7 @@ class TempikClient:
         timeout: int = 60,
         poll_interval: float = 1.5,
         otp_pattern: str = r"\b(\d{6})\b",
-    ) -> Optional[str]:
+    ) -> str | None:
         """Poll inbox until OTP email arrives.
 
         Args:
@@ -177,6 +178,7 @@ class TempikClient:
                             return match.group(1)
             except Exception as e:
                 import logging
+
                 logging.debug(f"Tempik poll error (will retry): {e}")
 
             await asyncio.sleep(poll_interval)
@@ -203,7 +205,7 @@ class TempikClientSync:
 
     def __init__(self, base_url: str = "https://tempik.webkarya.net/api"):
         self._client = TempikClient(base_url)
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         """Get or create event loop."""
@@ -227,25 +229,25 @@ class TempikClientSync:
         return loop.run_until_complete(coro)
 
     def create_session(self) -> str:
-        return self._run(self._client.create_session())
+        return cast(str, self._run(self._client.create_session()))
 
-    def create_inbox(self, local_part: Optional[str] = None) -> str:
-        return self._run(self._client.create_inbox(local_part))
+    def create_inbox(self, local_part: str | None = None) -> str:
+        return cast(str, self._run(self._client.create_inbox(local_part)))
 
     def get_messages(self, address: str) -> list[dict]:
-        return self._run(self._client.get_messages(address))
+        return cast(list[dict], self._run(self._client.get_messages(address)))
 
     def delete_inbox(self, address: str) -> bool:
-        return self._run(self._client.delete_inbox(address))
+        return cast(bool, self._run(self._client.delete_inbox(address)))
 
     def get_config(self) -> dict:
-        return self._run(self._client.get_config())
+        return cast(dict, self._run(self._client.get_config()))
 
-    def wait_for_otp(self, address: str, timeout: int = 60) -> Optional[str]:
-        return self._run(self._client.wait_for_otp(address, timeout))
+    def wait_for_otp(self, address: str, timeout: int = 60) -> str | None:
+        return cast(str | None, self._run(self._client.wait_for_otp(address, timeout)))
 
     def generate(self) -> dict:
-        return self._run(self._client.generate())
+        return cast(dict, self._run(self._client.generate()))
 
     def close(self):
         try:

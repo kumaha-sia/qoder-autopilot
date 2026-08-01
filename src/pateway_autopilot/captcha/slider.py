@@ -8,9 +8,8 @@ Uses OpenCV for gap detection and Playwright for interaction.
 
 import asyncio
 import random
-from typing import Optional
 
-from ..utils.logger import log, log_ok, log_err, log_warn
+from ..utils.logger import log, log_err, log_ok, log_warn
 
 
 class SliderSolver:
@@ -19,7 +18,7 @@ class SliderSolver:
     def __init__(self, max_attempts: int = 3):
         self.max_attempts = max_attempts
 
-    async def solve(self, page, slider_selector: str = None) -> bool:
+    async def solve(self, page, slider_selector: str | None = None) -> bool:
         """Solve slider CAPTCHA on the page.
 
         Args:
@@ -75,7 +74,7 @@ class SliderSolver:
         log_err("Slider solve failed after all attempts")
         return False
 
-    async def _detect_gap(self, page, screenshot: bytes) -> Optional[int]:
+    async def _detect_gap(self, page, screenshot: bytes) -> int | None:
         """Detect the horizontal position of the puzzle gap.
 
         Uses edge detection to find the gap in the image.
@@ -102,9 +101,7 @@ class SliderSolver:
             edges = cv2.Canny(blurred, 50, 150)
 
             # Find contours
-            contours, _ = cv2.findContours(
-                edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             # Look for rectangular contours that could be the gap
             # The gap is typically a dark/empty rectangular region
@@ -172,7 +169,7 @@ class SliderSolver:
             log_err(f"Gap detection error: {e}")
             return None
 
-    async def _find_slider(self, page, selector: str = None):
+    async def _find_slider(self, page, selector: str | None = None):
         """Find the slider element on the page.
 
         Tries multiple selectors if none provided.
@@ -213,9 +210,7 @@ class SliderSolver:
 
         return None
 
-    async def _drag_slider(
-        self, page, start_x: float, start_y: float, distance: float
-    ) -> bool:
+    async def _drag_slider(self, page, start_x: float, start_y: float, distance: float) -> bool:
         """Perform the slider drag with human-like movement.
 
         Uses smoothstep easing for natural movement with realistic physics.
@@ -248,14 +243,14 @@ class SliderSolver:
                 eased = progress * progress * (3 - 2 * progress)
 
                 # Add micro-corrections like a human
-                micro_correction = 0
+                micro_correction: float = 0.0
                 if 0.3 < progress < 0.7:  # Middle of drag - more wobble
                     micro_correction = random.uniform(-2, 2)
                 elif progress > 0.9:  # End - slight overshoot then correct
                     if i == steps - 2:
                         micro_correction = random.uniform(1, 5)
                     elif i == steps - 1:
-                        micro_correction = 0
+                        micro_correction = 0.0
 
                 x = start_x + distance * eased + micro_correction
                 y = start_y + random.uniform(-3, 3)  # Vertical wobble
@@ -302,7 +297,7 @@ class SliderSolver:
             return 'ok';
         }""")
 
-        if page_state in ('error_page', 'blank_page'):
+        if page_state in ("error_page", "blank_page"):
             log_warn(f"Page in {page_state} state — CAPTCHA verify assuming failure")
             return False
 
@@ -337,14 +332,18 @@ class SliderSolver:
             return True
 
         # Check for success message (stricter matching to avoid false positives)
-        page_text = await page.evaluate(
-            "() => document.body?.innerText?.substring(0, 500) || ''"
-        )
+        page_text = await page.evaluate("() => document.body?.innerText?.substring(0, 500) || ''")
         text_lower = page_text.lower()
         # Check for specific success phrases, not just substrings
         success_phrases = [
-            "success", "verified", "passed", "成功", "验证通过",
-            "solved", "confirmed", "approved",
+            "success",
+            "verified",
+            "passed",
+            "成功",
+            "验证通过",
+            "solved",
+            "confirmed",
+            "approved",
         ]
         # Only match if NOT preceded by negation words
         negations = ["not ", "un", "fail", "error", "invalid"]

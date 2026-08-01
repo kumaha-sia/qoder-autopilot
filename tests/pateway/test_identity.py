@@ -2,9 +2,7 @@
 Tests for Pateway Autopilot — Identity Generator
 """
 
-import pytest
-
-from pateway_autopilot.auth.identity import gen_identity, gen_email_address, _gen_password
+from pateway_autopilot.auth.identity import _gen_password, gen_email_address, gen_identity
 
 
 def test_gen_identity():

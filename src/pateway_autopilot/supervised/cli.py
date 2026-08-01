@@ -69,11 +69,11 @@ def _parse_args(argv: list[str]) -> dict:
             # coerce simple types
             if key in ("ms", "timeout", "delay", "steps", "dx", "dy"):
                 try:
-                    value = int(value)
+                    value = int(value)  # type: ignore[assignment]
                 except ValueError:
                     pass
             elif key == "start":
-                value = [int(x) for x in value.split(",")]
+                value = [int(x) for x in value.split(",")]  # type: ignore[assignment]
             params[key] = value
         else:
             positional.append(arg)

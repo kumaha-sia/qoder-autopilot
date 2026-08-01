@@ -5,9 +5,7 @@ Browser Module — Camoufox Launcher
 Launches Camoufox anti-detect browser with Playwright.
 """
 
-import asyncio
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from ..utils.logger import log, log_debug
 
@@ -15,7 +13,7 @@ from ..utils.logger import log, log_debug
 @asynccontextmanager
 async def launch_browser(
     headless: bool = True,
-    proxy: Optional[str] = None,
+    proxy: str | None = None,
     viewport_width: int = 1280,
     viewport_height: int = 720,
 ):
@@ -35,7 +33,7 @@ async def launch_browser(
     except ImportError:
         raise ImportError(
             "camoufox is required. Install with: pip install camoufox[geoip]"
-        )
+        ) from None
 
     log("🦊 Launching Camoufox browser...")
 

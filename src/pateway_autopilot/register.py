@@ -12,9 +12,15 @@ Complete 7-step registration with human-like behavior:
     7. Capture API key (shown only once!)
 """
 
+from __future__ import annotations
+
 import asyncio
 import random
 import time
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from .infra.gmail_imap import GmailImapClient
 
 from .auth.credentials import mask_value
 from .captcha.slider import ManualSolver, SliderSolver
@@ -80,6 +86,34 @@ async def human_type(page, text: str, min_delay: int = 30, max_delay: int = 120)
             await asyncio.sleep(random.uniform(0.2, 0.5))
 
 
+async def human_fill(page, element, text: str) -> None:
+    """Click a field and type text into it like a human.
+
+    This replaces ``element.fill(text)`` which sets the value instantly via
+    DOM — a dead giveaway for bot detection (Cloudflare Turnstile flags
+    instant fills).  The flow:
+        1. Click the field (focuses it + clears any existing value).
+        2. Clear any existing text (Ctrl+A → Delete).
+        3. Type character-by-character with human_type delays.
+    """
+    try:
+        await human_click(page, element)
+        # Clear existing content.
+        await page.keyboard.press("Control+a")
+        await asyncio.sleep(random.uniform(0.05, 0.15))
+        await page.keyboard.press("Delete")
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+        # Type character-by-character.
+        await human_type(page, text)
+        await human_delay(200, 600)
+    except Exception as e:
+        log_debug(f"human_fill failed, falling back to .fill(): {e}")
+        try:
+            await element.fill(text)
+        except Exception:
+            pass
+
+
 async def human_click(page, element, timeout: int = 10000):
     """Click element with human-like behavior."""
     try:
@@ -101,7 +135,7 @@ async def human_click(page, element, timeout: int = 10000):
         await element.click(timeout=timeout, force=True)
 
 
-async def human_scroll(page, direction: str = "down", amount: int = None):
+async def human_scroll(page, direction: str = "down", amount: int | None = None):
     """Scroll page like a human."""
     if amount is None:
         amount = random.randint(100, 300)
@@ -132,8 +166,14 @@ async def _handle_cloudflare_turnstile(page, timeout: int = 30) -> bool:
     """Detect and handle Cloudflare Turnstile challenge checkbox.
 
     Turnstile appears as an iframe from challenges.cloudflare.com with a
-    checkbox inside. We simulate human-like mouse movement to the checkbox
-    and click it.
+    checkbox inside.  The checkbox is in a shadow DOM — we use Playwright's
+    ``frame_locator`` to enter the iframe and click the checkbox at its
+    exact center, with human-like mouse movement beforehand.
+
+    Key insight: Cloudflare Turnstile's checkbox is NOT a regular
+    ``input[type=checkbox]`` — it's a div with role="checkbox" inside the
+    iframe's shadow DOM.  We click it by coordinates inside the iframe
+    frame, not by CSS selector.
 
     Returns True if Turnstile was found and handled (or not present),
     False if found but could not solve.
@@ -183,55 +223,99 @@ async def _handle_cloudflare_turnstile(page, timeout: int = 30) -> bool:
 
         log("   🔒 Cloudflare Turnstile detected — handling challenge...")
 
-        # Wait for Turnstile to fully load
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        # Wait for Turnstile to fully load — Cloudflare needs time to init.
+        await asyncio.sleep(random.uniform(2.0, 4.0))
 
-        # Try to find and click the checkbox inside the Turnstile iframe
-        # Turnstile iframe has a checkbox input we need to click
+        # Strategy 1: Use frame_locator to enter the Turnstile iframe and
+        # click the checkbox by its coordinates inside the frame.  The
+        # checkbox is typically in the left portion of the widget.
         for attempt in range(3):
             try:
-                # Find the Turnstile iframe
                 iframe_locators = page.locator('iframe[src*="challenges.cloudflare.com"]')
                 iframe_count = await iframe_locators.count()
 
-                if iframe_count > 0:
-                    for i in range(iframe_count):
-                        try:
-                            iframe = iframe_locators.nth(i)
-                            if not await iframe.is_visible(timeout=2000):
-                                continue
+                if iframe_count == 0:
+                    log_debug("No Turnstile iframe found on attempt")
+                    continue
 
-                            # Get iframe position for human-like mouse movement
-                            box = await iframe.bounding_box()
-                            if box:
-                                # Move mouse toward the iframe with human-like curve
-                                target_x = box["x"] + box["width"] / 2
-                                target_y = box["y"] + box["height"] / 2
-                                await human_move_mouse(page, int(target_x), int(target_y))
-                                await human_delay(300, 600)
+                for i in range(iframe_count):
+                    try:
+                        iframe = iframe_locators.nth(i)
+                        if not await iframe.is_visible(timeout=2000):
+                            continue
 
-                            # Try to access the iframe's frame and click the checkbox
-                            frame = await iframe.content_frame()
-                            if frame:
-                                checkbox = frame.locator('input[type="checkbox"]').first
-                                if await checkbox.is_visible(timeout=3000):
-                                    await human_delay(500, 1200)
+                        # Get iframe bounding box for mouse movement.
+                        box = await iframe.bounding_box()
+                        if not box:
+                            continue
+
+                        # The checkbox is on the LEFT side of the Turnstile
+                        # widget — typically around x=20-40px from the left
+                        # edge, vertically centered.
+                        checkbox_x = box["x"] + random.randint(20, 40)
+                        checkbox_y = box["y"] + box["height"] / 2 + random.randint(-5, 5)
+
+                        # Move mouse to the checkbox area with human-like curve.
+                        await human_move_mouse(page, int(checkbox_x), int(checkbox_y))
+                        await human_delay(400, 900)
+
+                        # Click the checkbox area.
+                        await page.mouse.click(checkbox_x, checkbox_y)
+                        log_debug(f"Turnstile click at ({checkbox_x:.0f}, {checkbox_y:.0f})")
+
+                        # Wait for Cloudflare to process the click.
+                        await asyncio.sleep(random.uniform(2.5, 4.5))
+
+                        # Check if Turnstile was solved.
+                        solved = await _check_turnstile_solved(page)
+                        if solved:
+                            log_ok("Cloudflare Turnstile solved! ✅")
+                            return True
+
+                        # Try entering the iframe frame and clicking the
+                        # checkbox element directly.
+                        frame = await iframe.content_frame()
+                        if frame:
+                            # Cloudflare Turnstile checkbox is typically
+                            # a div with role="checkbox" or an input.
+                            try:
+                                checkbox = frame.locator(
+                                    '[role="checkbox"], input[type="checkbox"], .cb-i, .mark'
+                                ).first
+                                if await checkbox.is_visible(timeout=2000):
+                                    await human_delay(300, 700)
                                     await checkbox.click(timeout=5000)
-                                    log_ok("Turnstile checkbox clicked via iframe")
+                                    log_debug("Turnstile checkbox clicked via frame")
                                     await asyncio.sleep(random.uniform(2, 4))
-
-                                    # Check if Turnstile was solved
                                     solved = await _check_turnstile_solved(page)
                                     if solved:
                                         log_ok("Cloudflare Turnstile solved! ✅")
                                         return True
-                        except Exception as e:
-                            log_debug(f"Turnstile iframe attempt {i} failed: {e}")
-                            continue
+                            except Exception as e:
+                                log_debug(f"Frame checkbox approach failed: {e}")
+
+                    except Exception as e:
+                        log_debug(f"Turnstile iframe attempt {i} failed: {e}")
+                        continue
             except Exception as e:
                 log_debug(f"Turnstile attempt {attempt + 1} failed: {e}")
 
-            await asyncio.sleep(random.uniform(1, 2))
+            # Wait before retry.
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+
+            # Re-check if Turnstile is still present (may auto-solve).
+            still_present = await page.evaluate("""() => {
+                const iframes = document.querySelectorAll(
+                    'iframe[src*="challenges.cloudflare.com"]'
+                );
+                for (const iframe of iframes) {
+                    if (iframe.offsetParent !== null) return true;
+                }
+                return false;
+            }""")
+            if not still_present:
+                log_ok("Turnstile disappeared — likely solved ✅")
+                return True
 
         # If iframe approach failed, try clicking directly on the Turnstile container area
         try:
@@ -333,7 +417,7 @@ async def _wait_for_manual_otp(page, timeout: int = 120) -> str | None:
 
         if otp_value:
             log_ok(f"OTP entered: {otp_value}")
-            return otp_value
+            return cast(str | None, otp_value)
 
         # Check if page progressed (password inputs appeared)
         has_password = await page.evaluate("""() => {
@@ -355,7 +439,7 @@ async def _wait_for_manual_otp(page, timeout: int = 120) -> str | None:
             }""")
             if otp_value:
                 log_ok(f"OTP accepted: {otp_value}")
-                return otp_value
+                return cast(str | None, otp_value)
             log_ok("OTP accepted (password fields visible)")
             return "manual"  # Signal that OTP was entered
 
@@ -371,7 +455,7 @@ async def register_and_verify(
     page,
     email: str,
     identity: dict,
-    temp_mail: TempMailClient,
+    temp_mail: TempMailClient | GmailImapClient | None,
     manual_captcha: bool = False,
     acct_num: int = 0,
     invite_code: str = "",
@@ -487,12 +571,11 @@ async def register_and_verify(
         log_step(3, 7, f"Entering email: {email}")
         email_input = page.locator('input[type="email"], input[placeholder*="example"]').first
 
-        # Fill email directly (more reliable than human_click + human_type for Ant Design)
+        # Fill email using human-like typing (anti-bot: .fill() is instant)
         try:
-            await email_input.fill(email)
+            await human_fill(page, email_input, email)
         except Exception:
-            await human_click(page, email_input)
-            await human_type(page, email, min_delay=50, max_delay=150)
+            await email_input.fill(email)
 
         # Pause after typing (like reviewing)
         await human_think("reading")
@@ -511,13 +594,19 @@ async def register_and_verify(
             try:
                 url = response.url
                 method = response.request.method
-                if method == "POST" and ("send" in url.lower() or "code" in url.lower() or "auth" in url.lower()):
+                if method == "POST" and (
+                    "send" in url.lower() or "code" in url.lower() or "auth" in url.lower()
+                ):
                     body_text = await response.text()
                     send_code_api_result["status"] = response.status
                     send_code_api_result["body"] = body_text[:500]
-                    log_debug(f"   Send code API: {method} {url[:100]} -> {response.status} ({len(body_text)}B)")
+                    log_debug(
+                        f"   Send code API: {method} {url[:100]} -> {response.status} ({len(body_text)}B)"
+                    )
                     if response.status >= 400:
-                        log_err(f"   Send code API error: HTTP {response.status}: {body_text[:200]}")
+                        log_err(
+                            f"   Send code API error: HTTP {response.status}: {body_text[:200]}"
+                        )
             except Exception:
                 pass
 
@@ -525,10 +614,14 @@ async def register_and_verify(
 
         for send_attempt in range(send_code_max_retries):
             if send_attempt > 0:
-                log(f"   Retrying Send code (attempt {send_attempt + 1}/{send_code_max_retries})...")
+                log(
+                    f"   Retrying Send code (attempt {send_attempt + 1}/{send_code_max_retries})..."
+                )
                 # Re-fill email in case it was cleared
                 try:
-                    email_input = page.locator('input[type="email"], input[placeholder*="example"]').first
+                    email_input = page.locator(
+                        'input[type="email"], input[placeholder*="example"]'
+                    ).first
                     await email_input.fill(email)
                     await human_think("quick")
                 except Exception:
@@ -858,7 +951,7 @@ async def register_and_verify(
         ).first
         try:
             await otp_input.wait_for(state="visible", timeout=5000)
-            await otp_input.fill(otp)
+            await human_fill(page, otp_input, otp)
             log_ok("OTP entered!")
         except Exception:
             # Fallback: try per-digit inputs
@@ -879,18 +972,17 @@ async def register_and_verify(
         # Pause before password
         await human_think("normal")
 
-        # Fill password — use fill() directly to avoid human_click timeout issues
-        # with Ant Design inputs (they have wrapper elements that intercept mouse events)
+        # Fill password using human-like typing (anti-bot)
         pw_inputs = page.locator('input[type="password"]')
         pw_count = await pw_inputs.count()
 
         if pw_count >= 2:
-            await pw_inputs.nth(0).fill(identity["password"])
+            await human_fill(page, pw_inputs.nth(0), identity["password"])
             await human_think("quick")
-            await pw_inputs.nth(1).fill(identity["password"])
+            await human_fill(page, pw_inputs.nth(1), identity["password"])
             log_ok("Password filled!")
         elif pw_count == 1:
-            await pw_inputs.nth(0).fill(identity["password"])
+            await human_fill(page, pw_inputs.nth(0), identity["password"])
             log_ok("Password filled!")
 
         # Fill invite code if provided
@@ -899,7 +991,7 @@ async def register_and_verify(
                 invite_input = page.locator(
                     'input[placeholder*="invitation"], input[placeholder*="invite"], input[id*="inviteCode"]'
                 ).first
-                await invite_input.fill(invite_code)
+                await human_fill(page, invite_input, invite_code)
                 log(f"   Invite code filled: {invite_code}")
             except Exception:
                 log_debug("No invite code field found")
@@ -955,13 +1047,11 @@ async def register_and_verify(
                         log_ok("ToS checkbox checked (JS fallback)")
                         break
             except Exception as exc:
-                log_debug(f"Checkbox attempt {_attempt+1} error: {exc}")
+                log_debug(f"Checkbox attempt {_attempt + 1} error: {exc}")
 
         if not checkbox_checked:
             log_err("ToS checkbox FAILED to check — submit will not work")
-            await page.screenshot(
-                path=str(config.SCREENSHOTS_DIR / f"checkbox_failed{suffix}.png")
-            )
+            await page.screenshot(path=str(config.SCREENSHOTS_DIR / f"checkbox_failed{suffix}.png"))
             return None
 
         # Handle Cloudflare Turnstile that may appear near the Sign up button
@@ -1079,9 +1169,7 @@ async def register_and_verify(
             await asyncio.sleep(2)
 
             current_url = page.url
-            page_text = await page.evaluate(
-                "() => document.body?.innerText || ''"
-            )
+            page_text = await page.evaluate("() => document.body?.innerText || ''")
             page_text_lower = page_text.lower()
 
             # DEBUG: show first 400 chars of body text so we can see what UI is showing
@@ -1216,78 +1304,172 @@ async def register_and_verify(
         return None
 
 
-async def _select_service_mode(page, service_mode: str) -> None:
-    """Select Service Mode in the Create Key modal via real DOM events.
+async def _dismiss_dropdown(page) -> None:
+    """Dismiss an open Ant Design Select dropdown without closing the modal.
 
-    Ant Design card-style radios ignore plain el.click() — the React handler
-    is attached to the <input type=radio> inside an <label>. We locate that
-    input by its label text and dispatch real mouse events on the input itself,
-    then React's onChange fires correctly.
+    ``page.keyboard.press("Escape")`` closes the Ant Design modal too, which
+    breaks subsequent clicks (Create button, Monthly Spending switch).  This
+    clicks on a non-interactive part of the modal body (the header/title) to
+    dismiss only the dropdown overlay.
     """
-    target = "Default Mode" if service_mode == "default" else "Economy"
-    log(f"   Selecting Service Mode: {target}")
     try:
-        # Dump modal structure first so we can debug selectors
+        await page.evaluate(
+            """() => {
+                // Click the modal header (non-interactive) to blur the Select.
+                const header = document.querySelector(
+                    '.ant-modal-body .console-keys-view__modal-header, '
+                    + '.ant-modal-body h2, .ant-modal-title'
+                );
+                if (header) header.click();
+                // Also dispatch mousedown on the modal wrapper — AntD Select
+                // listens for outside mousedown to close its dropdown.
+                const wrap = document.querySelector('.ant-modal-wrap');
+                if (wrap) {
+                    const evt = new MouseEvent('mousedown', {
+                        bubbles: true, cancelable: true, view: window, button: 0,
+                    });
+                    wrap.dispatchEvent(evt);
+                }
+            }"""
+        )
+    except Exception:
+        pass
+
+
+async def _select_service_mode(page, service_mode: str) -> None:
+    """Select Service Mode in the Create Key modal via Ant Design Select.
+
+    The Service Mode field is an Ant Design <Select> (dropdown).  The flow:
+        1. Click ``.ant-select-selector`` inside the modal to open the dropdown.
+        2. Wait for ``.ant-select-dropdown`` to become visible (it's portalled
+           to ``document.body``, NOT inside the modal — and AntD renders it
+           asynchronously, so we must wait, not query synchronously).
+        3. Click the ``.ant-select-item`` whose text matches the target label.
+        4. Verify by reading ``.ant-select-selection-item`` (the chosen value
+           chip inside the selector).
+
+    Key insight from live test: the previous single-evaluate JS approach failed
+    because AntD renders the dropdown asynchronously — ``querySelector`` ran
+    before the dropdown existed, returning ``'no-dropdown'``.  Using Playwright's
+    native ``click()`` + ``wait_for_selector`` handles the async timing.
+
+    After picking, we press Escape to close any lingering dropdown overlay —
+    if left open, it intercepts pointer events and blocks the Monthly Spending
+    Limit switch and the Create button.
+    """
+    target = "Default Mode" if service_mode == "default" else "Economy Mode"
+    log(f"   Selecting Service Mode: {target}")
+
+    try:
+        # Dump modal structure first so we can debug selectors.
         try:
-            modal_html = await page.locator('.ant-modal-body').inner_html()
-            log_debug(f"   Modal HTML (first 500): {modal_html[:500]}")
+            modal_html = await page.locator(".ant-modal-body").inner_html()
+            log_debug(f"   Modal HTML (first 800): {modal_html[:800]}")
         except Exception as exc:
             log_debug(f"   Could not dump modal HTML: {exc}")
 
-        # Find the radio input whose label/aria-label contains the target text
-        js = """
-        (target) => {
-            // Look for radio inputs inside Create Key modal
-            const modal = document.querySelector('.ant-modal-body');
-            if (!modal) return 'no-modal';
-            const labels = [...modal.querySelectorAll('label')];
-            for (const label of labels) {
-                const text = (label.textContent || label.ariaLabel || '').toLowerCase();
-                if (text.includes(target.toLowerCase())) {
-                    const radio = label.querySelector('input[type=radio]');
-                    if (radio) {
-                        radio.click(dispatch=True, bubbles=true);
-                        return 'radio-clicked:' + radio.value;
-                    }
-                }
-            }
-            // Fallback: aria-label on input directly (e.g. AntD Checkbox wraps
-            // these cards as checkbox inputs)
-            const inputs = [...modal.querySelectorAll('input[type=radio], input[type=checkbox]')];
-            for (const inp of inputs) {
-                const al = (inp.ariaLabel || inp.title || '').toLowerCase();
-                if (al.includes(target.toLowerCase())) {
-                    inp.click(dispatch=True, bubbles=true);
-                    return 'input-clicked:' + inp.value;
-                }
-            }
-            // Last resort: click any element whose text contains the target
-            const any = [...modal.querySelectorAll('*')].find(el => {
-                const t = (el.textContent || el.ariaLabel || '').toLowerCase();
-                return t.includes(target.toLowerCase()) && el.offsetParent;
-            });
-            if (any) {
-                any.click(dispatch=True, bubbles=true);
-                return 'any-clicked:' + (any.tagName + '/' + (any.textContent||'').trim().slice(0,20));
-            }
-            return 'not-found';
-        }
-        """
-        result = await page.evaluate(js, target)
-        log(f"   service mode click: {result}")
-        await asyncio.sleep(random.uniform(0.4, 0.9))
+        for attempt in range(1, 4):
+            # Step 1: open the dropdown via Playwright native click (handles
+            # async rendering and actionability checks).
+            selector = page.locator(".ant-modal-body .ant-select-selector").first
+            try:
+                await selector.click(timeout=5000)
+            except Exception as exc:
+                log_debug(f"   Selector click failed (attempt {attempt}): {exc}")
+                # Fallback: JS mousedown dispatch.
+                await page.evaluate(
+                    """() => {
+                        const m = document.querySelector('.ant-modal-body');
+                        const s = m && m.querySelector('.ant-select-selector');
+                        if (s) {
+                            const e = new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window, button: 0});
+                            s.dispatchEvent(e);
+                            const c = new MouseEvent('click', {bubbles: true, cancelable: true, view: window, button: 0});
+                            s.dispatchEvent(c);
+                        }
+                    }"""
+                )
 
-        # Verify the selection stuck — read back what's checked
-        verify = await page.evaluate("""
-            () => {
-                const modal = document.querySelector('.ant-modal-body');
-                if (!modal) return 'no-modal';
-                const checked = modal.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked');
-                const results = [...checked].map(c => c.value || c.ariaLabel || c.id);
-                return results.length ? results.join('|') : 'none';
-            }
-        """)
-        log(f"   service mode verify: {verify}")
+            # Step 2: wait for the dropdown to appear.  AntD portals it to
+            # document.body and adds the ``ant-select-dropdown-hidden`` class
+            # when closed — wait for a visible (non-hidden) dropdown.
+            try:
+                await page.wait_for_selector(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+                    timeout=5000,
+                )
+            except Exception:
+                log_warn(f"   Dropdown did not appear (attempt {attempt})")
+                # Close any stray state before retry — click modal body, NOT
+                # Escape (Escape closes the Ant Design modal too).
+                await _dismiss_dropdown(page)
+                await asyncio.sleep(0.3)
+                continue
+
+            # Step 3: click the matching option.  Use Playwright text engine
+            # to find the right item inside the visible dropdown.
+            try:
+                # Normalize target for matching — AntD item text may have
+                # extra whitespace.
+                option = page.locator(
+                    f".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
+                    f'.ant-select-item:has-text("{service_mode.title()}")'
+                ).first
+                await option.click(timeout=5000)
+                log(f"   service mode pick (attempt {attempt}): clicked '{service_mode}'")
+            except Exception as exc:
+                log_warn(f"   Option '{target}' not found/clicked (attempt {attempt}): {exc}")
+                await _dismiss_dropdown(page)
+                await asyncio.sleep(0.3)
+                continue
+
+            # Step 4: close any lingering dropdown overlay so it doesn't
+            # intercept pointer events on subsequent elements.
+            # IMPORTANT: do NOT use page.keyboard.press("Escape") — it also
+            # closes the Ant Design modal!  Use _dismiss_dropdown which clicks
+            # outside the dropdown without closing the modal.
+            await _dismiss_dropdown(page)
+            await asyncio.sleep(0.3)
+
+            # Step 5: verify by reading the selection chip.
+            verify = await page.evaluate(
+                """(target) => {
+                    const modal = document.querySelector('.ant-modal-body')
+                        || document.querySelector('.ant-modal');
+                    if (!modal) return {ok: false, value: '', reason: 'no-modal'};
+                    const chip = modal.querySelector(
+                        '.ant-select-selection-item, .ant-select-selection-selected-value'
+                    );
+                    const value = chip ? (chip.textContent || chip.title || '')
+                        .toLowerCase().trim() : '';
+                    return {
+                        ok: value === target.toLowerCase(),
+                        value: value,
+                        reason: value
+                            ? (value === target.toLowerCase() ? 'matched' : 'mismatch')
+                            : 'no-selection',
+                    };
+                }""",
+                target,
+            )
+            log(f"   service mode verify (attempt {attempt}): {verify}")
+            ok = verify.get("ok") if isinstance(verify, dict) else False
+            if ok:
+                return
+
+            got = verify.get("value", "") if isinstance(verify, dict) else str(verify)
+            log_warn(
+                f"Service mode verify mismatch (attempt {attempt}): "
+                f"want='{target}' got='{got}' — retrying"
+            )
+            # Close stray dropdown before retry.
+            await _dismiss_dropdown(page)
+            await asyncio.sleep(0.3)
+
+        log_warn(
+            f"Service mode selection FAILED after 3 attempts — '{target}' "
+            f"did not stick; key will likely be created as Default Mode"
+        )
     except Exception as exc:
         log_warn(f"Service mode selection failed ({target}): {exc}")
 
@@ -1329,7 +1511,6 @@ async def create_api_key(
                 log_ok(f"API key intercepted from response: {mask_value(captured_key)}")
         except Exception:
             pass
-
 
     # Also log ALL outgoing requests (not just responses) so we can see what
     # "Create" actually triggers — POST /key/create, WS frame, etc.
@@ -1474,7 +1655,7 @@ async def create_api_key(
                     continue
 
             if key_name_input:
-                await key_name_input.fill(key_name)
+                await human_fill(page, key_name_input, key_name)
                 log_debug(f"Key name set to: {key_name}")
             else:
                 log_warn(
@@ -1484,7 +1665,7 @@ async def create_api_key(
                 inputs = page.locator('input[type="text"]:visible')
                 count = await inputs.count()
                 if count > 0:
-                    await inputs.first.fill(key_name)
+                    await human_fill(page, inputs.first, key_name)
                 else:
                     log_err("Could not find any input for key name")
                     await page.screenshot(
@@ -1503,9 +1684,7 @@ async def create_api_key(
         # ═══ Turn OFF "Monthly Spending Limit" switch (if it's on) ═══
         # We want unlimited spend by default, so toggle the switch to OFF.
         try:
-            switch = page.locator(
-                '.ant-modal-body .ant-switch[role="switch"]'
-            ).first
+            switch = page.locator('.ant-modal-body .ant-switch[role="switch"]').first
             if await switch.is_visible(timeout=2000):
                 checked = await switch.get_attribute("aria-checked")
                 cls = await switch.get_attribute("class") or ""

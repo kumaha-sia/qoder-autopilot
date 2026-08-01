@@ -8,14 +8,16 @@ Provides colored log output for CLI.
 import contextvars
 import os
 import sys
-from typing import Optional
 
 # Force UTF-8 output on Windows
 if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        # reconfigure() is available on Python 3.7+ but the TextIO stubs
+        # don't declare it; guard at runtime for non-CPython shells.
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     except Exception:
         pass
 
@@ -60,7 +62,9 @@ def set_log_file(path: str):
     """Set log file path."""
     global _log_file
     try:
-        _log_file = open(path, "a", encoding="utf-8")
+        # Intentionally long-lived — closed via close_log_file(), not a `with`
+        # block, because the handle is shared across log calls.
+        _log_file = open(path, "a", encoding="utf-8")  # noqa: SIM115
         return _log_file
     except Exception:
         return None

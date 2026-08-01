@@ -11,7 +11,7 @@ Prerequisites:
 
 import asyncio
 
-from qoder_autopilot.cli import run_one, main_async
+from qoder_autopilot.cli import main_async, run_one
 from qoder_autopilot.errors import QoderAutopilotError
 
 
@@ -37,9 +37,9 @@ async def sequential_with_control():
     results = []
 
     for i in range(3):
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"📦 Account {i + 1}/3")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         try:
             result = await run_one(
@@ -53,7 +53,7 @@ async def sequential_with_control():
             if result:
                 print(f"   ✅ {result['email']}")
             else:
-                print(f"   ❌ Failed")
+                print("   ❌ Failed")
 
         except QoderAutopilotError as e:
             print(f"   ❌ Error: {e}")
@@ -66,9 +66,9 @@ async def sequential_with_control():
 
     # Summary
     success = sum(1 for r in results if r)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"📊 Results: {success}/{len(results)} succeeded")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":

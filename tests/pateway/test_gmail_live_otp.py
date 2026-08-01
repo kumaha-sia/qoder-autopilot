@@ -9,15 +9,14 @@ Usage:
 """
 
 import asyncio
-import json
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from pateway_autopilot.infra.gmail_imap import GmailImapClient
 from pateway_autopilot.infra.config import Settings
+from pateway_autopilot.infra.gmail_imap import GmailImapClient
 
 
 async def main():
@@ -45,7 +44,11 @@ async def main():
     for msg in messages:
         from_addr = msg.get("from_address", "") or ""
         subject = msg.get("subject", "") or ""
-        if "pateway" in from_addr.lower() or "验证码" in subject or "verification" in subject.lower():
+        if (
+            "pateway" in from_addr.lower()
+            or "验证码" in subject
+            or "verification" in subject.lower()
+        ):
             pateway_emails.append(msg)
 
     print(f"PatewayAI emails found: {len(pateway_emails)}")
@@ -53,7 +56,7 @@ async def main():
     if not pateway_emails:
         print("\nNo PatewayAI emails found. Showing ALL recent emails:")
         for i, msg in enumerate(messages):
-            print(f"\n--- Email {i+1} ---")
+            print(f"\n--- Email {i + 1} ---")
             print(f"  From: {msg.get('from_address', '')}")
             print(f"  Subject: {msg.get('subject', '')}")
             print(f"  Body (first 200 chars): {(msg.get('body', '') or '')[:200]}")
@@ -62,23 +65,23 @@ async def main():
 
     # Show each PatewayAI email with full body
     for i, msg in enumerate(pateway_emails):
-        print(f"\n{'='*60}")
-        print(f"PatewayAI Email #{i+1}")
-        print(f"{'='*60}")
+        print(f"\n{'=' * 60}")
+        print(f"PatewayAI Email #{i + 1}")
+        print(f"{'=' * 60}")
         print(f"  ID: {msg.get('id', '')[:60]}")
         print(f"  From: {msg.get('from_address', '')}")
         print(f"  Subject: {msg.get('subject', '')}")
         print(f"  Date: {msg.get('received_at', '')}")
 
         body = msg.get("body", "") or ""
-        print(f"\n  BODY (raw):")
-        print(f"  {'-'*50}")
+        print("\n  BODY (raw):")
+        print(f"  {'-' * 50}")
         for line in body.split("\n"):
             print(f"  | {line}")
-        print(f"  {'-'*50}")
+        print(f"  {'-' * 50}")
 
         # Test OTP extraction patterns
-        print(f"\n  OTP EXTRACTION TESTS:")
+        print("\n  OTP EXTRACTION TESTS:")
 
         # Strategy 1: VERIFICATION CODE pattern
         pat_verify = re.compile(r"VERIFICATION\s*CODE\D*(\d{6})", re.IGNORECASE)
@@ -120,7 +123,7 @@ async def main():
         if match:
             print(f"  ✅ NEW (multiline VERIFICATION CODE): {match.group(1)}")
         else:
-            print(f"  ❌ NEW (multiline VERIFICATION CODE): no match")
+            print("  ❌ NEW (multiline VERIFICATION CODE): no match")
 
         # Pattern: digits after Chinese text + newline
         pat_cn_multiline = re.compile(r"验证码[^\d]*\n\s*(\d{6})")
@@ -128,7 +131,7 @@ async def main():
         if match:
             print(f"  ✅ NEW (multiline 验证码): {match.group(1)}")
         else:
-            print(f"  ❌ NEW (multiline 验证码): no match")
+            print("  ❌ NEW (multiline 验证码): no match")
 
         # Show all 6-digit numbers found in body for debugging
         all_digits = re.findall(r"\d{6}", body)
@@ -136,9 +139,9 @@ async def main():
 
     # Also test wait_for_otp with the latest PatewayAI email
     if pateway_emails:
-        print(f"\n\n{'='*60}")
-        print(f"TESTING wait_for_otp() with LATEST PatewayAI email")
-        print(f"{'='*60}")
+        print(f"\n\n{'=' * 60}")
+        print("TESTING wait_for_otp() with LATEST PatewayAI email")
+        print(f"{'=' * 60}")
         # Reset baseline so the latest email is treated as "new"
         client._baseline_ids = set()
         otp = await client.wait_for_otp(timeout=5, poll_interval=1)
