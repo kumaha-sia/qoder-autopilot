@@ -165,182 +165,126 @@ async def random_mouse_movement(page):
 async def _handle_cloudflare_turnstile(page, timeout: int = 30) -> bool:
     """Detect and handle Cloudflare Turnstile challenge checkbox.
 
-    Turnstile appears as an iframe from challenges.cloudflare.com with a
-    checkbox inside.  The checkbox is in a shadow DOM — we use Playwright's
-    ``frame_locator`` to enter the iframe and click the checkbox at its
-    exact center, with human-like mouse movement beforehand.
+    The old implementation failed because:
+      1. It checked for the iframe with a single evaluate() — the iframe is
+         lazy-loaded by Cloudflare *after* the server returns
+         decision=challenge, so a single synchronous query runs too early.
+      2. It clicked the center of the container, not the actual checkbox
+         position (~25 px from the left edge, vertically centered).
+      3. It never polled for the cf-turnstile-response token — it just
+         checked whether the iframe "disappeared", which also happens when
+         the challenge *fails*.
 
-    Key insight: Cloudflare Turnstile's checkbox is NOT a regular
-    ``input[type=checkbox]`` — it's a div with role="checkbox" inside the
-    iframe's shadow DOM.  We click it by coordinates inside the iframe
-    frame, not by CSS selector.
+    This rewrite fixes all three: polls for the iframe with wait_for_selector,
+    targets the checkbox at the left-center of the widget, and polls for the
+    response token after clicking.
 
-    Returns True if Turnstile was found and handled (or not present),
-    False if found but could not solve.
+    Returns True if Turnstile was solved or not present, False if unsolvable.
     """
+    _iframe_sel = 'iframe[src*="challenges.cloudflare.com"]'
 
-    # Check for Turnstile iframe
     try:
-        turnstile_iframe = await page.evaluate("""() => {
-            // Look for Cloudflare Turnstile iframe
-            const iframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]');
-            for (const iframe of iframes) {
-                if (iframe.offsetParent !== null) {
-                    const rect = iframe.getBoundingClientRect();
-                    return {
-                        found: true,
-                        width: rect.width,
-                        height: rect.height,
-                        x: rect.x,
-                        y: rect.y,
-                        src: iframe.src.substring(0, 100)
-                    };
-                }
-            }
-            // Also check for cf-turnstile container (sometimes the iframe is inside)
-            const containers = document.querySelectorAll(
-                '[class*="turnstile"], [id*="turnstile"], [class*="cf-challenge"]'
-            );
-            for (const c of containers) {
-                if (c.offsetParent !== null) {
-                    const rect = c.getBoundingClientRect();
-                    return {
-                        found: true,
-                        width: rect.width,
-                        height: rect.height,
-                        x: rect.x,
-                        y: rect.y,
-                        src: 'container'
-                    };
-                }
-            }
-            return { found: false };
-        }""")
-
-        if not turnstile_iframe.get("found"):
-            log_debug("No Cloudflare Turnstile detected")
+        # ── Step 1: Poll for the iframe (it appears asynchronously) ────
+        # Cloudflare's JS lazy-loads the iframe after the server returns
+        # decision=challenge — so we must WAIT, not just query once.
+        try:
+            await page.wait_for_selector(_iframe_sel, timeout=5000)
+        except Exception:
+            log_debug("No Cloudflare Turnstile iframe detected")
             return True
 
+        # Iframe appeared — this is a real challenge.
         log("   🔒 Cloudflare Turnstile detected — handling challenge...")
+        await asyncio.sleep(random.uniform(1.5, 2.5))
 
-        # Wait for Turnstile to fully load — Cloudflare needs time to init.
-        await asyncio.sleep(random.uniform(2.0, 4.0))
-
-        # Strategy 1: Use frame_locator to enter the Turnstile iframe and
-        # click the checkbox by its coordinates inside the frame.  The
-        # checkbox is typically in the left portion of the widget.
+        # ── Step 2: Click the checkbox at the correct position ─────────
+        # The Turnstile widget is ~300×65 px.  The checkbox sits at the
+        # LEFT side, roughly x+25, y+height/2 from the iframe's top-left.
+        # The widget center only has the spinner — clicking there does nothing.
         for attempt in range(3):
             try:
-                iframe_locators = page.locator('iframe[src*="challenges.cloudflare.com"]')
-                iframe_count = await iframe_locators.count()
+                iframe_loc = page.locator(_iframe_sel)
+                if await iframe_loc.count() == 0:
+                    log_debug(f"Turnstile iframe gone on attempt {attempt + 1}")
+                    break
 
-                if iframe_count == 0:
-                    log_debug("No Turnstile iframe found on attempt")
+                box = await iframe_loc.first.bounding_box()
+                if not box:
+                    log_debug(f"No bounding box on attempt {attempt + 1}")
                     continue
 
-                for i in range(iframe_count):
-                    try:
-                        iframe = iframe_locators.nth(i)
-                        if not await iframe.is_visible(timeout=2000):
-                            continue
+                # Checkbox position: left-center of the widget.
+                checkbox_x = box["x"] + random.randint(20, 35)
+                checkbox_y = box["y"] + box["height"] / 2 + random.randint(-3, 3)
 
-                        # Get iframe bounding box for mouse movement.
-                        box = await iframe.bounding_box()
-                        if not box:
-                            continue
+                # Human-like mouse movement to the checkbox.
+                await human_move_mouse(page, int(checkbox_x), int(checkbox_y))
+                await human_delay(300, 700)
 
-                        # The checkbox is on the LEFT side of the Turnstile
-                        # widget — typically around x=20-40px from the left
-                        # edge, vertically centered.
-                        checkbox_x = box["x"] + random.randint(20, 40)
-                        checkbox_y = box["y"] + box["height"] / 2 + random.randint(-5, 5)
+                # Click the checkbox area.
+                await page.mouse.click(checkbox_x, checkbox_y)
+                log_debug(
+                    f"Turnstile click at ({checkbox_x:.0f}, {checkbox_y:.0f}) "
+                    f"(attempt {attempt + 1})"
+                )
 
-                        # Move mouse to the checkbox area with human-like curve.
-                        await human_move_mouse(page, int(checkbox_x), int(checkbox_y))
-                        await human_delay(400, 900)
+                # ── Step 3: Poll for the response token ────────────────
+                # The server-side token (cf-turnstile-response) is set by
+                # Cloudflare's JS ONLY when the challenge is genuinely solved.
+                # Checking "iframe disappeared" is wrong — it also disappears
+                # when the challenge fails or times out.
+                token = await _wait_for_turnstile_token(page, timeout=12)
+                if token:
+                    log_ok(f"Cloudflare Turnstile solved! ✅ (token={token[:20]}…)")
+                    return True
 
-                        # Click the checkbox area.
-                        await page.mouse.click(checkbox_x, checkbox_y)
-                        log_debug(f"Turnstile click at ({checkbox_x:.0f}, {checkbox_y:.0f})")
-
-                        # Wait for Cloudflare to process the click.
-                        await asyncio.sleep(random.uniform(2.5, 4.5))
-
-                        # Check if Turnstile was solved.
-                        solved = await _check_turnstile_solved(page)
-                        if solved:
-                            log_ok("Cloudflare Turnstile solved! ✅")
-                            return True
-
-                        # Try entering the iframe frame and clicking the
-                        # checkbox element directly.
-                        frame = await iframe.content_frame()
-                        if frame:
-                            # Cloudflare Turnstile checkbox is typically
-                            # a div with role="checkbox" or an input.
-                            try:
-                                checkbox = frame.locator(
-                                    '[role="checkbox"], input[type="checkbox"], .cb-i, .mark'
-                                ).first
-                                if await checkbox.is_visible(timeout=2000):
-                                    await human_delay(300, 700)
-                                    await checkbox.click(timeout=5000)
-                                    log_debug("Turnstile checkbox clicked via frame")
-                                    await asyncio.sleep(random.uniform(2, 4))
-                                    solved = await _check_turnstile_solved(page)
-                                    if solved:
-                                        log_ok("Cloudflare Turnstile solved! ✅")
-                                        return True
-                            except Exception as e:
-                                log_debug(f"Frame checkbox approach failed: {e}")
-
-                    except Exception as e:
-                        log_debug(f"Turnstile iframe attempt {i} failed: {e}")
-                        continue
-            except Exception as e:
-                log_debug(f"Turnstile attempt {attempt + 1} failed: {e}")
-
-            # Wait before retry.
-            await asyncio.sleep(random.uniform(1.5, 3.0))
-
-            # Re-check if Turnstile is still present (may auto-solve).
-            still_present = await page.evaluate("""() => {
-                const iframes = document.querySelectorAll(
-                    'iframe[src*="challenges.cloudflare.com"]'
-                );
-                for (const iframe of iframes) {
-                    if (iframe.offsetParent !== null) return true;
-                }
-                return false;
-            }""")
-            if not still_present:
-                log_ok("Turnstile disappeared — likely solved ✅")
-                return True
-
-        # If iframe approach failed, try clicking directly on the Turnstile container area
-        try:
-            if turnstile_iframe.get("found"):
-                x = int(turnstile_iframe.get("x", 0)) + random.randint(10, 30)
-                y = int(turnstile_iframe.get("y", 0)) + random.randint(5, 15)
-                await human_move_mouse(page, x, y)
-                await human_delay(500, 1000)
-                await page.mouse.click(x, y)
-                log_debug("Clicked Turnstile area directly")
-                await asyncio.sleep(random.uniform(2, 4))
-
+                # Also check if iframe is gone AND token is set (sometimes
+                # the iframe closes before the input updates).
                 solved = await _check_turnstile_solved(page)
                 if solved:
                     log_ok("Cloudflare Turnstile solved! ✅")
                     return True
-        except Exception as e:
-            log_debug(f"Turnstile direct click failed: {e}")
 
+                log_debug(f"Attempt {attempt + 1}: click issued but token not yet present")
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+
+            except Exception as e:
+                log_debug(f"Turnstile attempt {attempt + 1} exception: {e}")
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+
+        # All attempts exhausted without a token.
         log_warn("Could not auto-solve Turnstile — it may need manual intervention")
         return False
 
     except Exception as e:
         log_debug(f"Turnstile detection error: {e}")
         return True
+
+
+async def _wait_for_turnstile_token(page, timeout: int = 12) -> str | None:
+    """Poll for the cf-turnstile-response hidden input to acquire a value.
+
+    Cloudflare's JS sets this input only when the challenge is genuinely
+    solved (a valid cryptographic token).  We poll every 0.5–1 s for up to
+    ``timeout`` seconds.
+
+    Returns the token string if found, None if timed out.
+    """
+    start = __import__("time").time()
+    while __import__("time").time() - start < timeout:
+        try:
+            token = await page.evaluate("""() => {
+                const el = document.querySelector(
+                    'input[name="cf-turnstile-response"], [name="cf-turnstile-response"]'
+                );
+                return el && el.value && el.value.length > 10 ? el.value : null;
+            }""")
+            if token:
+                return str(token)
+        except Exception:
+            pass
+        await asyncio.sleep(random.uniform(0.5, 1.0))
+    return None
 
 
 async def _check_turnstile_solved(page) -> bool:
