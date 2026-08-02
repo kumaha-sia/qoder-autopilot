@@ -91,7 +91,23 @@ async def run_one(
         if "gmail.com" in effective_email.lower() or "googlemail.com" in effective_email.lower():
             from .infra.email_gen import GmailAliasGenerator
 
-            gen = GmailAliasGenerator(effective_email, method="dot", prefix="reg")
+            # Load previously used aliases from credentials file so we
+            # don't generate the same dot-trick alias twice across runs.
+            used_aliases: set[str] = set()
+            try:
+                from .auth.credentials import load_creds
+
+                existing = load_creds()
+                for cred in existing:
+                    e = cred.get("email", "")
+                    if e and effective_email.split("@")[0].replace(".", "") in e:
+                        used_aliases.add(e)
+            except Exception:
+                pass
+
+            gen = GmailAliasGenerator(
+                effective_email, method="dot", prefix="reg", used_aliases=used_aliases
+            )
             email = gen.get(acct_num) if acct_num > 0 else gen.next()
             log_ok(f"Gmail alias: {email}")
 

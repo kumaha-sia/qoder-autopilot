@@ -153,15 +153,28 @@ def generate_alias(base_email: str, method: str = "plus", prefix: str = "pateway
 
 
 class GmailAliasGenerator:
-    """Generate Gmail aliases for bulk registration."""
+    """Generate Gmail aliases for bulk registration.
 
-    def __init__(self, base_email: str, method: str = "combined", prefix: str = "pateway"):
+    Tracks used aliases across runs by loading them from the credentials
+    file — this prevents generating the same dot-trick alias twice when
+    the generator is re-instantiated for each account in a bulk run.
+    """
+
+    def __init__(
+        self,
+        base_email: str,
+        method: str = "combined",
+        prefix: str = "pateway",
+        used_aliases: set[str] | None = None,
+    ):
         """Initialize generator.
 
         Args:
             base_email: Your Gmail address (e.g., "you@gmail.com").
             method: Alias method — "dot", "plus", or "combined" (default).
             prefix: Prefix for plus tags.
+            used_aliases: Set of aliases already used in previous runs.
+                Loaded from credentials file to prevent duplicates.
         """
         if "@gmail.com" not in base_email.lower() and "@googlemail.com" not in base_email.lower():
             raise ValueError(f"Not a Gmail address: {base_email}")
@@ -170,7 +183,7 @@ class GmailAliasGenerator:
         self.local_part, self.domain = base_email.split("@", 1)
         self.method = method
         self.prefix = prefix
-        self._used: set[str] = set()
+        self._used: set[str] = used_aliases if used_aliases is not None else set()
         self._counter = 0
 
     def next(self) -> str:
