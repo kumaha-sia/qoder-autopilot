@@ -110,7 +110,7 @@ class ProxyRotator:
         return len(self._healthy) if self._healthy is not None else self.count
 
     async def health_check(
-        self, timeout: float = 8.0, test_url: str = "https://httpbin.org/ip"
+        self, timeout: float = 8.0, test_url: str = "https://www.google.com"
     ) -> None:
         """Test all proxies and cache the healthy ones.
 
