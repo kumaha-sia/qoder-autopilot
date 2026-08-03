@@ -9,13 +9,13 @@ Includes async health check to skip dead/slow proxies before use.
 """
 
 import asyncio
-import itertools
 import random
+import time
 from pathlib import Path
 
 import httpx
 
-from ..utils.logger import log, log_ok, log_warn
+from ..utils.logger import log, log_debug, log_ok, log_warn
 
 
 def parse_proxy_line(line: str) -> str | None:
@@ -77,11 +77,37 @@ def load_proxies(filepath: str) -> list[str]:
     return proxies
 
 
-class ProxyRotator:
-    """Rotates through a list of proxies in round-robin order.
+class _ProxyEntry:
+    """Tracks a single proxy's state: URL, failure count, last-used time."""
 
-    Supports async health checking — dead/slow proxies are skipped so
-    accounts don't waste 30s on a browser launch that will timeout.
+    __slots__ = ("url", "failures", "last_used")
+
+    def __init__(self, url: str):
+        self.url = url
+        self.failures: int = 0
+        self.last_used: float = 0.0
+
+    @property
+    def is_dead(self) -> bool:
+        return self.failures >= 3
+
+    def reset_if_stale(self, stale_seconds: float = 300.0) -> None:
+        """Reset failure count if proxy hasn't been used for 5+ minutes."""
+        if self.last_used > 0 and (time.time() - self.last_used > stale_seconds):
+            self.failures = 0
+
+
+class ProxyRotator:
+    """Rotates through a list of proxies with failure-aware rotation.
+
+    Features (inspired by mekithil's ProxyManager):
+      - Per-proxy failure tracking — dead proxies are skipped, not retried
+        immediately.  After 3 consecutive failures a proxy is marked dead.
+      - Auto-reset — dead proxies are retried after 5 minutes of inactivity
+        (the upstream block may have expired).
+      - Country-aware fingerprint hints — map proxy IP to locale/timezone
+        so the browser fingerprint matches the proxy's geography.
+      - Async health check at startup — skip dead/slow proxies before use.
     """
 
     def __init__(self, proxies: list[str], shuffle: bool = True):
@@ -91,23 +117,24 @@ class ProxyRotator:
             proxies: List of proxy URLs.
             shuffle: If True, shuffle proxies before rotating (default True).
         """
-        self._proxies = list(proxies)
-        if shuffle and len(self._proxies) > 1:
-            random.shuffle(self._proxies)
-        self._cycle = itertools.cycle(self._proxies) if self._proxies else None
-        self._lock = None  # Lazy init for async safety
-        self._healthy: list[str] | None = None  # Lazy: filled by health_check()
-        self._healthy_cycle: itertools.cycle[str] | None = None
+        self._entries: list[_ProxyEntry] = [_ProxyEntry(p) for p in proxies]
+        if shuffle and len(self._entries) > 1:
+            random.shuffle(self._entries)
+        self._index = 0
+        self._healthy: list[str] | None = None  # filled by health_check()
+        self._failures_this_run: dict[str, int] = {}
 
     @property
     def count(self) -> int:
         """Number of proxies available."""
-        return len(self._proxies)
+        return len(self._entries)
 
     @property
     def healthy_count(self) -> int:
-        """Number of healthy proxies (after health check)."""
-        return len(self._healthy) if self._healthy is not None else self.count
+        """Number of healthy proxies (after health check + failure tracking)."""
+        if self._healthy is not None:
+            return len(self._healthy)
+        return sum(1 for e in self._entries if not e.is_dead)
 
     async def health_check(
         self, timeout: float = 8.0, test_url: str = "https://www.google.com"
@@ -119,74 +146,124 @@ class ProxyRotator:
 
         This should be called once at startup before the first account.
         """
-        if not self._proxies:
+        if not self._entries:
             return
 
-        log(f"🩺 Health-checking {len(self._proxies)} proxies (timeout={timeout}s)...")
+        log(f"🩺 Health-checking {len(self._entries)} proxies (timeout={timeout}s)...")
 
-        async def _check_one(proxy_url: str) -> str | None:
-            # httpx uses the proxy URL directly for all schemes.
+        async def _check_one(entry: _ProxyEntry) -> str | None:
             try:
                 async with httpx.AsyncClient(
-                    proxy=proxy_url, timeout=timeout, follow_redirects=True
+                    proxy=entry.url, timeout=timeout, follow_redirects=True
                 ) as client:
                     resp = await client.get(test_url)
                     if resp.status_code < 400:
-                        return proxy_url
+                        return entry.url
             except Exception:
                 return None
             return None
 
-        # Run all checks concurrently for speed.
-        results = await asyncio.gather(*[_check_one(p) for p in self._proxies])
+        results = await asyncio.gather(*[_check_one(e) for e in self._entries])
         healthy = [p for p in results if p is not None]
 
         if not healthy:
             log_warn("⚠️  All proxies failed health check — using all anyway")
-            self._healthy = list(self._proxies)
+            self._healthy = [e.url for e in self._entries]
         else:
             self._healthy = healthy
-            log_ok(f"✅ {len(healthy)}/{len(self._proxies)} proxies are healthy")
-
-        if self._healthy and len(self._healthy) > 1:
-            random.shuffle(self._healthy)
-        self._healthy_cycle = itertools.cycle(self._healthy) if self._healthy else None
+            log_ok(f"✅ {len(healthy)}/{len(self._entries)} proxies are healthy")
 
     def next(self) -> str | None:
-        """Get next healthy proxy in rotation.
+        """Get next healthy proxy in round-robin order.
 
-        Returns:
-            Proxy URL or None if no proxies available.
+        Skips dead proxies (3+ consecutive failures).  If all proxies are
+        dead, resets all failure counts and starts over.
         """
-        cycle = self._healthy_cycle or self._cycle
-        if not cycle:
+        if not self._entries:
             return None
-        return next(cycle)
 
-    def peek(self, index: int = 0) -> str | None:
-        """Peek at proxy at given index (0-based).
+        healthy_urls = set(self._healthy) if self._healthy else None
 
-        Args:
-            index: Index into proxy list.
+        for _ in range(len(self._entries)):
+            entry = self._entries[self._index]
+            self._index = (self._index + 1) % len(self._entries)
 
-        Returns:
-            Proxy URL or None if index out of range.
+            entry.reset_if_stale()
+
+            if healthy_urls and entry.url not in healthy_urls:
+                continue
+
+            if entry.is_dead:
+                continue
+
+            entry.last_used = time.time()
+            return entry.url
+
+        # All proxies are dead — reset and try again.
+        log_warn("⚠️  All proxies marked bad — resetting failures")
+        for e in self._entries:
+            e.failures = 0
+        entry = self._entries[0]
+        entry.last_used = time.time()
+        self._index = 1
+        return entry.url
+
+    def report_failure(self, proxy_url: str) -> None:
+        """Mark a proxy as failed — it will be skipped for the next accounts.
+
+        Called when a proxy's browser launch or page.goto fails.
+        Inspired by mekithil's ProxyManager.reportFailure().
         """
-        source = self._healthy or self._proxies
-        if not source:
-            return None
-        return source[index % len(source)]
+        for entry in self._entries:
+            if entry.url == proxy_url:
+                entry.failures += 1
+                self._failures_this_run[proxy_url] = entry.failures
+                log_debug(f"Proxy {proxy_url[:40]}… failed ({entry.failures}/3)")
+                break
+
+    def report_success(self, proxy_url: str) -> None:
+        """Reset failure count for a proxy that worked."""
+        for entry in self._entries:
+            if entry.url == proxy_url:
+                entry.failures = 0
+                break
+
+    def status(self) -> dict:
+        """Return proxy pool status for logging."""
+        healthy = sum(1 for e in self._entries if not e.is_dead)
+        dead = sum(1 for e in self._entries if e.is_dead)
+        return {
+            "total": len(self._entries),
+            "healthy": healthy,
+            "dead": dead,
+            "failures_this_run": dict(self._failures_this_run),
+        }
 
     def get_for_account(self, account_num: int) -> str | None:
         """Get healthy proxy for a specific account number (1-based).
 
-        Args:
-            account_num: Account number (1, 2, 3, ...).
-
-        Returns:
-            Proxy URL or None if no proxies available.
+        Uses round-robin with failure-aware rotation.
         """
-        source = self._healthy or self._proxies
-        if not source:
+        if not self._entries:
             return None
-        return source[(account_num - 1) % len(source)]
+
+        start = (account_num - 1) % len(self._entries)
+        for i in range(len(self._entries)):
+            entry = self._entries[(start + i) % len(self._entries)]
+            entry.reset_if_stale()
+            if not entry.is_dead:
+                entry.last_used = time.time()
+                return entry.url
+
+        # All dead — reset.
+        for e in self._entries:
+            e.failures = 0
+        entry = self._entries[start % len(self._entries)]
+        entry.last_used = time.time()
+        return entry.url
+
+    def peek(self, index: int = 0) -> str | None:
+        """Peek at proxy at given index (0-based)."""
+        if not self._entries:
+            return None
+        return self._entries[index % len(self._entries)].url

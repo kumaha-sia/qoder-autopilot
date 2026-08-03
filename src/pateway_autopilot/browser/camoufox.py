@@ -5,6 +5,7 @@ Browser Module — Camoufox Launcher
 Launches Camoufox anti-detect browser with Playwright.
 """
 
+import random
 from contextlib import asynccontextmanager
 from urllib.parse import unquote, urlparse
 
@@ -91,12 +92,24 @@ async def setup_page(page):
     Args:
         page: Playwright page object.
     """
-    # Set viewport (Camoufox manages window size; viewport follows)
+    # Random viewport per account (inspired by mekithil's fingerprint.js).
+    # Using the same viewport for every account is a bot signal.
+    viewports = [
+        {"width": 1920, "height": 1080},
+        {"width": 1536, "height": 864},
+        {"width": 1440, "height": 900},
+        {"width": 1366, "height": 768},
+        {"width": 1600, "height": 900},
+        {"width": 1680, "height": 1050},
+        {"width": 1280, "height": 720},
+        {"width": 1280, "height": 800},
+    ]
+    vp = random.choice(viewports)
     try:
-        vp = page.viewport_size or {"width": 1280, "height": 720}
         await page.set_viewport_size(vp)
     except Exception:
         await page.set_viewport_size({"width": 1280, "height": 720})
+    log_debug(f"Viewport set to {vp['width']}x{vp['height']}")
 
     # Set realistic user agent (Camoufox handles this, but we can override)
     # await page.set_extra_http_headers({

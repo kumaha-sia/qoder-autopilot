@@ -463,6 +463,12 @@ async def main_async(args: argparse.Namespace) -> None:
                 user_email=user_email,
                 mail_provider=mail_provider,
             )
+            # Track proxy success/failure for smart rotation.
+            if proxy_rotator and acct_proxy:
+                if r and isinstance(r, dict):
+                    proxy_rotator.report_success(acct_proxy)
+                elif r is None:
+                    proxy_rotator.report_failure(acct_proxy)
             results.append(r)
             if i < args.count - 1:
                 d = args.delay + random.randint(0, 15)
