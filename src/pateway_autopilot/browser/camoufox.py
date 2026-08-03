@@ -115,9 +115,19 @@ async def setup_page(page, fingerprint_hint: dict[str, str] | None = None):
     log_debug(f"Viewport set to {vp['width']}x{vp['height']}")
 
     # Apply country-aware fingerprint (locale + timezone + Accept-Language).
+    # Inspired by mekithil: ctxOpts.locale + ctxOpts.timezoneId ensure
+    # the browser fingerprint is consistent with the proxy's geography.
     locale = (fingerprint_hint or {}).get("locale", "en-US")
     timezone = (fingerprint_hint or {}).get("timezone", "America/New_York")
     country = (fingerprint_hint or {}).get("country", "US")
+
+    # Set locale on the browser context itself (Playwright API).
+    # This ensures the locale is consistent from the very first request.
+    try:
+        await page.context.set_locale(locale)
+        log_debug(f"Context locale set to {locale}")
+    except Exception:
+        log_debug(f"Context set_locale not supported: {locale}")
 
     # Set timezone via CDP.
     try:

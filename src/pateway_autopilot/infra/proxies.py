@@ -287,7 +287,7 @@ PROXY_COUNTRY_MAP: dict[str, dict[str, list[str]]] = {
     "PH": {"locales": ["en-PH", "en-US"], "timezones": ["Asia/Manila"]},
     "VN": {"locales": ["vi-VN", "en-US"], "timezones": ["Asia/Ho_Chi_Minh"]},
     "GB": {"locales": ["en-GB"], "timezones": ["Europe/London"]},
-    "AU": {"locales": ["en-AU"], "timezones": ["Australia/Sydney"]},
+    "AU": {"locales": ["en-AU"], "timezones": ["Australia/Sydney", "Australia/Melbourne"]},
     "CA": {"locales": ["en-CA", "en-US"], "timezones": ["America/Toronto", "America/Vancouver"]},
     "DE": {"locales": ["de-DE", "en-US"], "timezones": ["Europe/Berlin"]},
     "FR": {"locales": ["fr-FR", "en-US"], "timezones": ["Europe/Paris"]},
@@ -296,6 +296,35 @@ PROXY_COUNTRY_MAP: dict[str, dict[str, list[str]]] = {
     "IN": {"locales": ["en-IN", "en-US"], "timezones": ["Asia/Kolkata"]},
     "BR": {"locales": ["pt-BR", "en-US"], "timezones": ["America/Sao_Paulo"]},
     "NL": {"locales": ["nl-NL", "en-US"], "timezones": ["Europe/Amsterdam"]},
+    # Additional countries (mekithil has 35 total)
+    "IT": {"locales": ["it-IT", "en-US"], "timezones": ["Europe/Rome"]},
+    "ES": {"locales": ["es-ES", "en-US"], "timezones": ["Europe/Madrid"]},
+    "PL": {"locales": ["pl-PL", "en-US"], "timezones": ["Europe/Warsaw"]},
+    "SE": {"locales": ["sv-SE", "en-US"], "timezones": ["Europe/Stockholm"]},
+    "NO": {"locales": ["nb-NO", "en-US"], "timezones": ["Europe/Oslo"]},
+    "DK": {"locales": ["da-DK", "en-US"], "timezones": ["Europe/Copenhagen"]},
+    "FI": {"locales": ["fi-FI", "en-US"], "timezones": ["Europe/Helsinki"]},
+    "CH": {"locales": ["de-CH", "en-US"], "timezones": ["Europe/Zurich"]},
+    "AT": {"locales": ["de-AT", "en-US"], "timezones": ["Europe/Vienna"]},
+    "BE": {"locales": ["nl-BE", "en-US"], "timezones": ["Europe/Brussels"]},
+    "PT": {"locales": ["pt-PT", "en-US"], "timezones": ["Europe/Lisbon"]},
+    "IE": {"locales": ["en-IE", "en-US"], "timezones": ["Europe/Dublin"]},
+    "NZ": {"locales": ["en-NZ", "en-US"], "timezones": ["Pacific/Auckland"]},
+    "ZA": {"locales": ["en-ZA", "en-US"], "timezones": ["Africa/Johannesburg"]},
+    "AE": {"locales": ["ar-AE", "en-US"], "timezones": ["Asia/Dubai"]},
+    "SA": {"locales": ["ar-SA", "en-US"], "timezones": ["Asia/Riyadh"]},
+    "TR": {"locales": ["tr-TR", "en-US"], "timezones": ["Europe/Istanbul"]},
+    "RU": {"locales": ["ru-RU", "en-US"], "timezones": ["Europe/Moscow"]},
+    "CN": {"locales": ["zh-CN", "en-US"], "timezones": ["Asia/Shanghai"]},
+    "TW": {"locales": ["zh-TW", "en-US"], "timezones": ["Asia/Taipei"]},
+    "HK": {"locales": ["zh-HK", "en-US"], "timezones": ["Asia/Hong_Kong"]},
+    "MX": {"locales": ["es-MX", "en-US"], "timezones": ["America/Mexico_City"]},
+    "AR": {"locales": ["es-AR", "en-US"], "timezones": ["America/Buenos_Aires"]},
+    "CL": {"locales": ["es-CL", "en-US"], "timezones": ["America/Santiago"]},
+    "CO": {"locales": ["es-CO", "en-US"], "timezones": ["America/Bogota"]},
+    "EG": {"locales": ["ar-EG", "en-US"], "timezones": ["Africa/Cairo"]},
+    "NG": {"locales": ["en-NG", "en-US"], "timezones": ["Africa/Lagos"]},
+    "KE": {"locales": ["en-KE", "en-US"], "timezones": ["Africa/Nairobi"]},
 }
 
 # Cache: proxy_url → (country_code, locale, timezone)
@@ -325,38 +354,82 @@ def get_fingerprint_hint(proxy_url: str | None, default_country: str = "US") -> 
     }
 
 
+def _extract_ip(proxy_url: str) -> str | None:
+    """Extract the IP address from a proxy URL string.
+
+    Supports:
+        - http://user:pass@1.2.3.4:8080  → "1.2.3.4"
+        - socks5://user:pass@1.2.3.4:8080 → "1.2.3.4"
+        - 1.2.3.4:8080:user:pass         → "1.2.3.4"
+        - 1.2.3.4:8080                    → "1.2.3.4"
+    """
+    if not proxy_url:
+        return None
+    # URL format: extract host after "@"
+    if "@" in proxy_url:
+        after_at = proxy_url.split("@")[-1]
+        return after_at.split(":")[0].strip()
+    # ip:port:user:pass or ip:port
+    return proxy_url.split(":")[0].strip()
+
+
+# Rate limit state for ip-api.com (45 req/min → ~1.3s between requests).
+_last_geo_query: float = 0.0
+
+
 async def detect_proxy_country(proxy_url: str, timeout: float = 5.0) -> str | None:
-    """Detect the country of a proxy IP via ipinfo.io.
+    """Detect the country of a proxy IP via ip-api.com (free, no API key).
+
+    Unlike ipinfo.io, ip-api.com works WITHOUT going through the proxy —
+    we extract the IP first, then query directly.  This avoids the problem
+    where the proxy itself blocks ipinfo.io.
 
     Caches the result per proxy URL so we only query once per proxy.
-    Returns the 2-letter country code (e.g., "US", "ID", "SG") or None on failure.
+    Returns the 2-letter country code (e.g., "US", "ID", "SG") or None.
     """
+    global _last_geo_query
     if proxy_url in _country_cache:
         return _country_cache[proxy_url][0]
 
+    ip = _extract_ip(proxy_url)
+    if not ip:
+        log_debug(f"Could not extract IP from {proxy_url[:30]}…")
+        return None
+
+    # Rate limit: wait if needed (ip-api.com: 45 req/min).
+    elapsed = time.time() - _last_geo_query
+    if elapsed < 1.3:
+        await asyncio.sleep(1.3 - elapsed)
+
     try:
-        async with httpx.AsyncClient(
-            proxy=proxy_url, timeout=timeout, follow_redirects=True
-        ) as client:
-            resp = await client.get("https://ipinfo.io/json")
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(
+                f"http://ip-api.com/json/{ip}",
+                params={"fields": "status,countryCode,country,city,isp"},
+            )
+            _last_geo_query = time.time()
             if resp.status_code == 200:
                 data = resp.json()
-                country = str(data.get("country", "US"))
-                city = data.get("city", "")
-                org = data.get("org", "")
-                mapping = PROXY_COUNTRY_MAP.get(country, PROXY_COUNTRY_MAP["US"])
-                locale = mapping["locales"][0]
-                tz = mapping["timezones"][0]
-                _country_cache[proxy_url] = (country, locale, tz)
-                log_debug(f"Proxy {proxy_url[:30]}… → {country} ({city}, {org}) → {locale}/{tz}")
-                return country
+                if data.get("status") == "success":
+                    country = str(data.get("countryCode", "US"))
+                    city = str(data.get("city", ""))
+                    isp = str(data.get("isp", ""))
+                    mapping = PROXY_COUNTRY_MAP.get(country, PROXY_COUNTRY_MAP["US"])
+                    locale = mapping["locales"][0]
+                    tz = mapping["timezones"][0]
+                    _country_cache[proxy_url] = (country, locale, tz)
+                    log_debug(f"GeoDetect {ip} → {country} ({city}, {isp}) → {locale}/{tz}")
+                    return country
     except Exception as exc:
-        log_debug(f"Country detection failed for {proxy_url[:30]}…: {exc}")
+        log_debug(f"Country detection failed for {ip}: {exc}")
     return None
 
 
 async def detect_all_proxy_countries(rotator: "ProxyRotator", timeout: float = 5.0) -> None:
-    """Detect country for all proxies in the rotator (concurrent).
+    """Detect country for all proxies — sequential with rate limiting.
+
+    Inspired by mekithil: queries ip-api.com directly (not through proxy),
+    one at a time with 1.5s delay between requests (rate limit: 45/min).
 
     Called once at startup alongside health_check().  Results are cached
     so get_fingerprint_hint() returns correct locale/timezone per proxy.
@@ -366,6 +439,20 @@ async def detect_all_proxy_countries(rotator: "ProxyRotator", timeout: float = 5
 
     urls = [e.url for e in rotator._entries]
     log(f"🌍 Detecting countries for {len(urls)} proxies...")
-    results = await asyncio.gather(*[detect_proxy_country(u, timeout) for u in urls])
-    detected = sum(1 for r in results if r is not None)
-    log_ok(f"🌍 Detected {detected}/{len(urls)} proxy countries")
+
+    detected = 0
+    countries_found: set[str] = set()
+    for url in urls:
+        country = await detect_proxy_country(url, timeout)
+        if country:
+            detected += 1
+            countries_found.add(country)
+        # Rate limit: ip-api.com allows 45 req/min → ~1.3s between requests.
+        await asyncio.sleep(1.5)
+
+    if countries_found:
+        log_ok(
+            f"🌍 Detected {detected}/{len(urls)} proxy countries: {', '.join(sorted(countries_found))}"
+        )
+    else:
+        log_warn(f"🌍 Could not detect any proxy countries ({detected}/{len(urls)})")
