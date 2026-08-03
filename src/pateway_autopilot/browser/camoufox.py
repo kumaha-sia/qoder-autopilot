@@ -8,7 +8,7 @@ Launches Camoufox anti-detect browser with Playwright.
 from contextlib import asynccontextmanager
 from urllib.parse import unquote, urlparse
 
-from ..utils.logger import log, log_debug
+from ..utils.logger import log, log_debug, log_warn
 
 
 def _parse_proxy_url(proxy_url: str) -> dict:
@@ -60,13 +60,29 @@ async def launch_browser(
     if proxy:
         proxy_dict = _parse_proxy_url(proxy)
 
-    async with AsyncCamoufox(
-        headless=headless,
-        geoip=True,
-        proxy=proxy_dict,
-    ) as browser:
-        log_debug(f"Browser launched (headless={headless}, proxy={proxy})")
-        yield browser
+    # When using a proxy, Camoufox's geoip lookup tries to fetch the public IP
+    # via ipecho.net.  If the proxy is slow or dead, this times out and crashes
+    # the whole run.  Retry once with geoip=False as a fallback.
+    try:
+        async with AsyncCamoufox(
+            headless=headless,
+            geoip=True,
+            proxy=proxy_dict,
+        ) as browser:
+            log_debug(f"Browser launched (headless={headless}, proxy={proxy})")
+            yield browser
+    except Exception as exc:
+        if "InvalidIP" in type(exc).__name__ or "Failed to get IP" in str(exc):
+            log_warn(f"Proxy geoip lookup failed ({exc}) — retrying without geoip")
+            async with AsyncCamoufox(
+                headless=headless,
+                geoip=False,
+                proxy=proxy_dict,
+            ) as browser:
+                log_debug(f"Browser launched (headless={headless}, proxy={proxy}, geoip=False)")
+                yield browser
+        else:
+            raise
 
 
 async def setup_page(page):
