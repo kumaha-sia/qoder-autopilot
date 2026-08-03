@@ -86,11 +86,14 @@ async def launch_browser(
             raise
 
 
-async def setup_page(page):
+async def setup_page(page, fingerprint_hint: dict[str, str] | None = None):
     """Configure page with anti-detect settings.
 
     Args:
         page: Playwright page object.
+        fingerprint_hint: Optional dict with locale, timezone, country keys.
+            If provided, applies locale/timezone/headers to match the proxy's
+            geography (makes the browser fingerprint consistent with the IP).
     """
     # Random viewport per account (inspired by mekithil's fingerprint.js).
     # Using the same viewport for every account is a bot signal.
@@ -111,10 +114,30 @@ async def setup_page(page):
         await page.set_viewport_size({"width": 1280, "height": 720})
     log_debug(f"Viewport set to {vp['width']}x{vp['height']}")
 
-    # Set realistic user agent (Camoufox handles this, but we can override)
-    # await page.set_extra_http_headers({
-    #     "Accept-Language": "en-US,en;q=0.9",
-    # })
+    # Apply country-aware fingerprint (locale + timezone + Accept-Language).
+    locale = (fingerprint_hint or {}).get("locale", "en-US")
+    timezone = (fingerprint_hint or {}).get("timezone", "America/New_York")
+    country = (fingerprint_hint or {}).get("country", "US")
+
+    # Set timezone via CDP.
+    try:
+        cdp = await page.context.new_cdp_session(page)
+        await cdp.send("Emulation.setTimezoneOverride", {"timezoneId": timezone})
+        log_debug(f"Timezone set to {timezone} (country={country})")
+    except Exception:
+        log_debug(f"Timezone override not supported: {timezone}")
+
+    # Set Accept-Language header to match locale.
+    try:
+        base_lang = locale.split("-")[0]
+        await page.set_extra_http_headers(
+            {
+                "Accept-Language": f"{locale},{base_lang};q=0.9",
+            }
+        )
+        log_debug(f"Accept-Language set to {locale}")
+    except Exception:
+        pass
 
     # Disable webdriver flag
     await page.add_init_script("""

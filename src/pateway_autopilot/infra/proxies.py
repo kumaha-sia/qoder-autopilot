@@ -267,3 +267,105 @@ class ProxyRotator:
         if not self._entries:
             return None
         return self._entries[index % len(self._entries)].url
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COUNTRY → FINGERPRINT MAPPING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Maps country code → locale + timezone options (inspired by mekithil).
+# Used to make the browser fingerprint consistent with the proxy's geography.
+PROXY_COUNTRY_MAP: dict[str, dict[str, list[str]]] = {
+    "US": {
+        "locales": ["en-US"],
+        "timezones": ["America/New_York", "America/Chicago", "America/Los_Angeles"],
+    },
+    "ID": {"locales": ["id-ID"], "timezones": ["Asia/Jakarta", "Asia/Makassar", "Asia/Jayapura"]},
+    "SG": {"locales": ["en-SG", "en-US"], "timezones": ["Asia/Singapore"]},
+    "MY": {"locales": ["en-US", "ms-MY"], "timezones": ["Asia/Kuala_Lumpur"]},
+    "TH": {"locales": ["th-TH", "en-US"], "timezones": ["Asia/Bangkok"]},
+    "PH": {"locales": ["en-PH", "en-US"], "timezones": ["Asia/Manila"]},
+    "VN": {"locales": ["vi-VN", "en-US"], "timezones": ["Asia/Ho_Chi_Minh"]},
+    "GB": {"locales": ["en-GB"], "timezones": ["Europe/London"]},
+    "AU": {"locales": ["en-AU"], "timezones": ["Australia/Sydney"]},
+    "CA": {"locales": ["en-CA", "en-US"], "timezones": ["America/Toronto", "America/Vancouver"]},
+    "DE": {"locales": ["de-DE", "en-US"], "timezones": ["Europe/Berlin"]},
+    "FR": {"locales": ["fr-FR", "en-US"], "timezones": ["Europe/Paris"]},
+    "JP": {"locales": ["ja-JP", "en-US"], "timezones": ["Asia/Tokyo"]},
+    "KR": {"locales": ["ko-KR", "en-US"], "timezones": ["Asia/Seoul"]},
+    "IN": {"locales": ["en-IN", "en-US"], "timezones": ["Asia/Kolkata"]},
+    "BR": {"locales": ["pt-BR", "en-US"], "timezones": ["America/Sao_Paulo"]},
+    "NL": {"locales": ["nl-NL", "en-US"], "timezones": ["Europe/Amsterdam"]},
+}
+
+# Cache: proxy_url → (country_code, locale, timezone)
+_country_cache: dict[str, tuple[str, str, str]] = {}
+
+
+def get_fingerprint_hint(proxy_url: str | None, default_country: str = "US") -> dict[str, str]:
+    """Get locale + timezone fingerprint hint for a proxy URL.
+
+    Uses cached country detection if available.  Falls back to default_country
+    mapping if detection hasn't been done yet.
+
+    Returns:
+        {"locale": "en-US", "timezone": "America/New_York", "country": "US"}
+    """
+    if proxy_url and proxy_url in _country_cache:
+        country, locale, tz = _country_cache[proxy_url]
+        return {"locale": locale, "timezone": tz, "country": country}
+
+    # No cache yet — use default.
+    country = default_country.upper()
+    mapping = PROXY_COUNTRY_MAP.get(country, PROXY_COUNTRY_MAP["US"])
+    return {
+        "locale": mapping["locales"][0],
+        "timezone": mapping["timezones"][0],
+        "country": country,
+    }
+
+
+async def detect_proxy_country(proxy_url: str, timeout: float = 5.0) -> str | None:
+    """Detect the country of a proxy IP via ipinfo.io.
+
+    Caches the result per proxy URL so we only query once per proxy.
+    Returns the 2-letter country code (e.g., "US", "ID", "SG") or None on failure.
+    """
+    if proxy_url in _country_cache:
+        return _country_cache[proxy_url][0]
+
+    try:
+        async with httpx.AsyncClient(
+            proxy=proxy_url, timeout=timeout, follow_redirects=True
+        ) as client:
+            resp = await client.get("https://ipinfo.io/json")
+            if resp.status_code == 200:
+                data = resp.json()
+                country = str(data.get("country", "US"))
+                city = data.get("city", "")
+                org = data.get("org", "")
+                mapping = PROXY_COUNTRY_MAP.get(country, PROXY_COUNTRY_MAP["US"])
+                locale = mapping["locales"][0]
+                tz = mapping["timezones"][0]
+                _country_cache[proxy_url] = (country, locale, tz)
+                log_debug(f"Proxy {proxy_url[:30]}… → {country} ({city}, {org}) → {locale}/{tz}")
+                return country
+    except Exception as exc:
+        log_debug(f"Country detection failed for {proxy_url[:30]}…: {exc}")
+    return None
+
+
+async def detect_all_proxy_countries(rotator: "ProxyRotator", timeout: float = 5.0) -> None:
+    """Detect country for all proxies in the rotator (concurrent).
+
+    Called once at startup alongside health_check().  Results are cached
+    so get_fingerprint_hint() returns correct locale/timezone per proxy.
+    """
+    if not rotator._entries:
+        return
+
+    urls = [e.url for e in rotator._entries]
+    log(f"🌍 Detecting countries for {len(urls)} proxies...")
+    results = await asyncio.gather(*[detect_proxy_country(u, timeout) for u in urls])
+    detected = sum(1 for r in results if r is not None)
+    log_ok(f"🌍 Detected {detected}/{len(urls)} proxy countries")

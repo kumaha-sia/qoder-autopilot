@@ -150,7 +150,15 @@ async def run_one(
         proxy=proxy,
     ) as browser:
         page = await browser.new_page()
-        await setup_page(page)
+        # Get fingerprint hint for this proxy's country (locale/timezone).
+        from .infra.proxies import get_fingerprint_hint
+
+        fp_hint = get_fingerprint_hint(proxy)
+        if fp_hint.get("country") != "US":
+            log_debug(
+                f"   Fingerprint: {fp_hint['locale']}, {fp_hint['timezone']} ({fp_hint['country']})"
+            )
+        await setup_page(page, fingerprint_hint=fp_hint)
 
         # Wipe any prior auth state so each account starts from a cold signup form
         try:
@@ -366,6 +374,10 @@ async def main_async(args: argparse.Namespace) -> None:
     # accounts don't waste 30s on a browser launch that will timeout.
     if proxy_rotator and proxy_rotator.count > 1:
         await proxy_rotator.health_check()
+        # Detect proxy countries for fingerprint mapping (locale/timezone).
+        from .infra.proxies import detect_all_proxy_countries
+
+        await detect_all_proxy_countries(proxy_rotator)
 
     # Dry-run mode
     if args.dry_run:
