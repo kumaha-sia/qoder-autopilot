@@ -362,6 +362,11 @@ async def main_async(args: argparse.Namespace) -> None:
         proxy_rotator = ProxyRotator([proxy])
         proxy = None  # Clear single proxy, rotator handles it
 
+    # Health-check proxies before starting — skip dead/slow ones so
+    # accounts don't waste 30s on a browser launch that will timeout.
+    if proxy_rotator and proxy_rotator.count > 1:
+        await proxy_rotator.health_check()
+
     # Dry-run mode
     if args.dry_run:
         log_ok("Dry-run mode: configuration is valid ✅")
