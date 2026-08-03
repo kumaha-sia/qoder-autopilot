@@ -106,7 +106,7 @@ async def run_one(
                 pass
 
             gen = GmailAliasGenerator(
-                effective_email, method="dot", prefix="reg", used_aliases=used_aliases
+                effective_email, method="combined", prefix="reg", used_aliases=used_aliases
             )
             email = gen.get(acct_num) if acct_num > 0 else gen.next()
             log_ok(f"Gmail alias: {email}")
@@ -165,15 +165,43 @@ async def run_one(
         except Exception:
             pass
 
-        api_keys = await register_and_verify(
-            page,
-            email,
-            ident,
-            temp_mail,
-            manual_captcha=manual_captcha,
-            acct_num=acct_num,
-            invite_code=invite_code,
-        )
+        # Register with retry — if email already registered, generate a new
+        # alias and try again (up to 3 times).
+        api_keys = None
+        for email_attempt in range(3):
+            if email_attempt > 0:
+                # Generate new email alias for retry.
+                if "gmail.com" in effective_email.lower() and gen:
+                    email = gen.next()
+                    used_aliases.add(email)
+                    log_ok(f"🔄 New Gmail alias: {email}")
+                else:
+                    break  # Can't generate new alias for non-Gmail
+
+            api_keys = await register_and_verify(
+                page,
+                email,
+                ident,
+                temp_mail,
+                manual_captcha=manual_captcha,
+                acct_num=acct_num,
+                invite_code=invite_code,
+            )
+
+            # If email already registered, retry with new alias.
+            if api_keys == "EMAIL_ALREADY_REGISTERED":
+                log_warn(f"Email {email} already registered — trying new alias")
+                # Clear page state for fresh attempt.
+                try:
+                    await page.context.clear_cookies()
+                    await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
+                    await page.goto(config.PATEWAY_URL, wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                continue
+
+            # Got a real result (dict or None) — exit loop.
+            break
 
         # Keep browser open briefly so user can see what happened
         if not api_keys:
@@ -203,7 +231,11 @@ async def run_one(
 
     log_ok("Account registered & API keys created! ✅")
 
-    # Save credentials
+    # Save credentials — api_keys is guaranteed dict here (str/None already
+    # handled by the retry loop above).
+    if not isinstance(api_keys, dict):
+        log_err("Internal error: api_keys is not a dict after success check")
+        return None
     key_default = api_keys.get("default")
     key_economy = api_keys.get("economy")
     referral_code = api_keys.get("referral_code")

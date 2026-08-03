@@ -403,7 +403,7 @@ async def register_and_verify(
     manual_captcha: bool = False,
     acct_num: int = 0,
     invite_code: str = "",
-) -> dict | None:
+) -> dict | str | None:
     """Full PatewayAI registration flow with human-like behavior.
 
     Args:
@@ -414,6 +414,11 @@ async def register_and_verify(
         manual_captcha: If True, pause for manual captcha solving.
         acct_num: Account number for logging (parallel mode).
         invite_code: Optional invite code.
+
+    Returns:
+        Dict with api_keys on success, None on failure, or
+        "EMAIL_ALREADY_REGISTERED" if the email is already registered
+        (caller should generate a new email and retry).
 
     Returns:
         Dict {"default": sk-..., "economy": sk-...} if at least one key
@@ -551,6 +556,14 @@ async def register_and_verify(
                         log_err(
                             f"   Send code API error: HTTP {response.status}: {body_text[:200]}"
                         )
+                        # Detect "already registered" (code 450044 / 该邮箱已注册)
+                        # so the caller can generate a new email and retry.
+                        if (
+                            "450044" in body_text
+                            or "已注册" in body_text
+                            or "already" in body_text.lower()
+                        ):
+                            send_code_api_result["already_registered"] = True
             except Exception:
                 pass
 
@@ -783,6 +796,15 @@ async def register_and_verify(
 
             # If we got an error or found captcha/otp, decide whether to retry
             if got_error_this_attempt:
+                # Check if "already registered" — don't retry, signal caller
+                # to generate a new email.
+                if send_code_api_result.get("already_registered"):
+                    log_warn("Email already registered — need new email")
+                    try:
+                        page.remove_listener("response", _on_send_code_response)
+                    except Exception:
+                        pass
+                    return "EMAIL_ALREADY_REGISTERED"
                 if send_attempt < send_code_max_retries - 1:
                     log_warn("Send code errored — will retry after short delay")
                     await asyncio.sleep(3)
