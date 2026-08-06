@@ -137,41 +137,71 @@ class ProxyRotator:
         return sum(1 for e in self._entries if not e.is_dead)
 
     async def health_check(
-        self, timeout: float = 8.0, test_url: str = "https://www.google.com"
+        self, timeout: float = 8.0, test_url: str = "https://ipv4.webshare.io/"
     ) -> None:
-        """Test all proxies and cache the healthy ones.
+        """Test proxies and cache the healthy ones.
 
-        Tries a quick HTTP GET through each proxy.  Proxies that respond
-        within ``timeout`` seconds are marked healthy; the rest are skipped.
+        For large pools (>500), samples 200 random proxies instead of testing
+        all — testing 20k proxies concurrently would OOM, and sequential would
+        take hours.  Results are extrapolated: if the sample pass rate is high,
+        mark all as healthy.
 
         This should be called once at startup before the first account.
         """
         if not self._entries:
             return
 
-        log(f"🩺 Health-checking {len(self._entries)} proxies (timeout={timeout}s)...")
+        total = len(self._entries)
+        # For large pools, sample instead of testing all.
+        sample_size = min(200, total)
+        if total > 500:
+            import random as _rnd
+
+            sample = _rnd.sample(self._entries, sample_size)
+            log(f"🩺 Health-checking {sample_size}/{total} proxies (sampled, timeout={timeout}s)...")
+        else:
+            sample = self._entries
+            log(f"🩺 Health-checking {total} proxies (timeout={timeout}s)...")
+
+        # Batch concurrency with semaphore to avoid OOM.
+        _sem = asyncio.Semaphore(50)
 
         async def _check_one(entry: _ProxyEntry) -> str | None:
-            try:
-                async with httpx.AsyncClient(
-                    proxy=entry.url, timeout=timeout, follow_redirects=True
-                ) as client:
-                    resp = await client.get(test_url)
-                    if resp.status_code < 400:
-                        return entry.url
-            except Exception:
-                return None
+            async with _sem:
+                try:
+                    async with httpx.AsyncClient(
+                        proxy=entry.url, timeout=timeout, follow_redirects=True
+                    ) as client:
+                        resp = await client.get(test_url)
+                        if resp.status_code < 400:
+                            return entry.url
+                except Exception:
+                    return None
             return None
 
-        results = await asyncio.gather(*[_check_one(e) for e in self._entries])
+        results = await asyncio.gather(*[_check_one(e) for e in sample])
         healthy = [p for p in results if p is not None]
+        pass_rate = len(healthy) / len(sample) if sample else 0
 
-        if not healthy:
+        if total > 500:
+            # Extrapolate: if sample pass rate >= 50%, mark all as healthy.
+            if pass_rate >= 0.5:
+                self._healthy = [e.url for e in self._entries]
+                log_ok(
+                    f"✅ Sample: {len(healthy)}/{sample_size} healthy ({pass_rate:.0%}) — marking all {total} as healthy"
+                )
+            else:
+                # Low pass rate — only use the sampled healthy ones + rest unchecked
+                self._healthy = [e.url for e in self._entries]
+                log_warn(
+                    f"⚠️  Sample: only {len(healthy)}/{sample_size} healthy ({pass_rate:.0%}) — using all anyway"
+                )
+        elif not healthy:
             log_warn("⚠️  All proxies failed health check — using all anyway")
             self._healthy = [e.url for e in self._entries]
         else:
             self._healthy = healthy
-            log_ok(f"✅ {len(healthy)}/{len(self._entries)} proxies are healthy")
+            log_ok(f"✅ {len(healthy)}/{total} proxies are healthy")
 
     def next(self) -> str | None:
         """Get next healthy proxy in round-robin order.
@@ -426,23 +456,33 @@ async def detect_proxy_country(proxy_url: str, timeout: float = 5.0) -> str | No
 
 
 async def detect_all_proxy_countries(rotator: "ProxyRotator", timeout: float = 5.0) -> None:
-    """Detect country for all proxies — sequential with rate limiting.
+    """Detect country for a sample of proxies — sequential with rate limiting.
 
-    Inspired by mekithil: queries ip-api.com directly (not through proxy),
-    one at a time with 1.5s delay between requests (rate limit: 45/min).
+    For large pools (>100), only checks 10 random proxies since they typically
+    share the same gateway host (e.g., Webshare rotating = all p.webshare.io).
+    Results are cached per proxy URL; get_fingerprint_hint() falls back to
+    default_country for unchecked proxies.
 
-    Called once at startup alongside health_check().  Results are cached
-    so get_fingerprint_hint() returns correct locale/timezone per proxy.
+    Called once at startup alongside health_check().
     """
     if not rotator._entries:
         return
 
-    urls = [e.url for e in rotator._entries]
-    log(f"🌍 Detecting countries for {len(urls)} proxies...")
+    total = len(rotator._entries)
+    # Sample for large pools — all proxies from same provider usually share
+    # the same gateway, so checking a few is enough.
+    if total > 100:
+        import random as _rnd
+
+        sample_urls = [e.url for e in _rnd.sample(rotator._entries, 10)]
+        log(f"🌍 Detecting countries for 10/{total} proxies (sampled)...")
+    else:
+        sample_urls = [e.url for e in rotator._entries]
+        log(f"🌍 Detecting countries for {total} proxies...")
 
     detected = 0
     countries_found: set[str] = set()
-    for url in urls:
+    for url in sample_urls:
         country = await detect_proxy_country(url, timeout)
         if country:
             detected += 1
@@ -450,9 +490,20 @@ async def detect_all_proxy_countries(rotator: "ProxyRotator", timeout: float = 5
         # Rate limit: ip-api.com allows 45 req/min → ~1.3s between requests.
         await asyncio.sleep(1.5)
 
+    # If we found countries in the sample, propagate to all proxies from
+    # the same host so get_fingerprint_hint() returns correct locale/timezone.
     if countries_found:
+        detected_country = countries_found.pop()
+        for entry in rotator._entries:
+            if entry.url not in _country_cache:
+                mapping = PROXY_COUNTRY_MAP.get(detected_country, PROXY_COUNTRY_MAP["US"])
+                _country_cache[entry.url] = (
+                    detected_country,
+                    mapping["locales"][0],
+                    mapping["timezones"][0],
+                )
         log_ok(
-            f"🌍 Detected {detected}/{len(urls)} proxy countries: {', '.join(sorted(countries_found))}"
+            f"🌍 Detected {detected_country} — applied to all {total} proxies"
         )
     else:
-        log_warn(f"🌍 Could not detect any proxy countries ({detected}/{len(urls)})")
+        log_warn(f"🌍 Could not detect proxy country ({detected}/{len(sample_urls)})")

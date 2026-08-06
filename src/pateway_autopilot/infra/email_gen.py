@@ -187,32 +187,27 @@ class GmailAliasGenerator:
         self._counter = 0
 
     def next(self) -> str:
-        """Generate next unique alias.
+        """Generate next unique alias using dot trick only.
+
+        Gmail ignores dots in the local part, so all dot variations
+        deliver to the same inbox. No '+' sign — PatewayAI rejects it.
 
         Returns:
             New unique Gmail alias.
         """
         while True:
             self._counter += 1
-            suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
 
-            if self.method == "dot":
-                dots = generate_dot_variations(self.local_part, 5)
-                base = random.choice(dots)
-                alias = f"{base}@{self.domain}"
-            elif self.method == "plus":
-                alias = f"{self.local_part}+{self.prefix}{self._counter}{suffix}@{self.domain}"
-            else:  # combined
-                dots = generate_dot_variations(self.local_part, 5)
-                base = random.choice(dots)
-                alias = f"{base}+{self.prefix}{self._counter}{suffix}@{self.domain}"
+            dots = generate_dot_variations(self.local_part, 10)
+            base = random.choice(dots)
+            alias = f"{base}@{self.domain}"
 
             if alias not in self._used:
                 self._used.add(alias)
                 return alias
 
     def get(self, index: int) -> str:
-        """Get alias by index (1-based).
+        """Get alias by index (1-based) using dot trick only.
 
         Args:
             index: Alias number (1, 2, 3, ...).
@@ -220,18 +215,9 @@ class GmailAliasGenerator:
         Returns:
             Gmail alias for the given index.
         """
-        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
-
-        if self.method == "dot":
-            dots = generate_dot_variations(self.local_part, max(index, 5))
-            base = dots[(index - 1) % len(dots)]
-            return f"{base}@{self.domain}"
-        elif self.method == "plus":
-            return f"{self.local_part}+{self.prefix}{index}{suffix}@{self.domain}"
-        else:  # combined
-            dots = generate_dot_variations(self.local_part, max(index, 5))
-            base = dots[(index - 1) % len(dots)]
-            return f"{base}+{self.prefix}{index}{suffix}@{self.domain}"
+        dots = generate_dot_variations(self.local_part, max(index, 10))
+        base = dots[(index - 1) % len(dots)]
+        return f"{base}@{self.domain}"
 
     def batch(self, count: int) -> list[str]:
         """Generate a batch of unique aliases.
